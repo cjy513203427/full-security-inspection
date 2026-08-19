@@ -44,16 +44,23 @@ type sigResult struct {
 	sha256 string
 }
 
+// enrichWorkers/enrichQueueSize are sized for real observed process churn
+// (systems easily rack up several hundred processes in normal use — each
+// browser tab/helper, each service, etc.) now that this queue also carries
+// name-resolution jobs, not just signature checks.
+const enrichWorkers = 4
+const enrichQueueSize = 2048
+
 func New(onUpdate func(model.ProcessInfo)) *Cache {
 	c := &Cache{
 		m:          make(map[uint32]*model.ProcessInfo),
 		onUpdate:   onUpdate,
 		sigCache:   make(map[string]sigResult),
-		jobs:       make(chan uint32, 512),
+		jobs:       make(chan uint32, enrichQueueSize),
 		knownApps:  config.KnownBrowsers(),
 		suspicious: config.SuspiciousPathFragments(),
 	}
-	for i := 0; i < 3; i++ {
+	for i := 0; i < enrichWorkers; i++ {
 		go c.worker()
 	}
 	return c
@@ -62,16 +69,21 @@ func New(onUpdate func(model.ProcessInfo)) *Cache {
 // Observe records a process-start event coming from ETW. The event usually
 // carries PID/PPID/ImagePath/CommandLine already, but when it doesn't (seen
 // in practice for some ETW process-start records — not limited to any one
-// app), this runs the exact same fallback ladder Lookup uses for a
-// completely unfamiliar PID, so a process is never left unidentified just
-// because it happened to arrive via the ETW path instead of the "we'd
-// never heard of this PID before" path:
-//  1. parent-process inheritance (cheap, no syscalls) — a child of a
-//     process we've already identified is presumed part of the same app
-//     (e.g. Chrome's sandboxed subprocesses are still chrome.exe);
-//  2. a direct OS query (queryBasic: OpenProcess + Toolhelp32 snapshot).
+// app), Observe tries the cheap fallback itself (parent-process
+// inheritance: a child of a process we've already identified is presumed
+// part of the same app, e.g. Chrome's sandboxed subprocesses are still
+// chrome.exe) and leaves the expensive one (queryBasic: OpenProcess +
+// a full Toolhelp32 process-snapshot walk) to the background worker in
+// enrich.
 //
-// Only if both fail does the record stay genuinely unidentified.
+// That split matters: Observe runs synchronously on the ETW dispatch
+// goroutine — the same single goroutine every network/file/DNS event also
+// flows through — so anything slow here risks the consumer falling behind
+// and Windows dropping ETW events under load, which would silently lose
+// real security-relevant data, not just a process name. A cache miss on a
+// name is comparatively cheap to live with (the correlation engine already
+// treats "identity unknown" as a distinct, honestly-scored case, not a
+// dropped event).
 func (c *Cache) Observe(pi model.ProcessInfo) {
 	if pi.Name == "" && pi.PPID != 0 {
 		c.mu.RLock()
@@ -83,23 +95,12 @@ func (c *Cache) Observe(pi model.ProcessInfo) {
 			pi.NameInherited = true
 		}
 	}
-	if pi.Name == "" {
-		if qb := queryBasic(pi.PID); qb.Name != "" {
-			pi.Name = qb.Name
-			if pi.ImagePath == "" {
-				pi.ImagePath = qb.ImagePath
-			}
-			if pi.PPID == 0 {
-				pi.PPID = qb.PPID
-			}
-		}
-	}
 	c.applyHeuristics(&pi)
 	c.mu.Lock()
 	cp := pi
 	c.m[pi.PID] = &cp
 	c.mu.Unlock()
-	c.queue(pi.PID)
+	c.queue(pi.PID) // enrich() will try queryBasic too if Name is still empty, off this hot path
 }
 
 func (c *Cache) applyHeuristics(pi *model.ProcessInfo) {
@@ -158,8 +159,38 @@ func (c *Cache) enrich(pid uint32) {
 	c.mu.RLock()
 	p, ok := c.m[pid]
 	c.mu.RUnlock()
-	if !ok || p.ImagePath == "" {
+	if !ok {
 		return
+	}
+
+	// Observe() only tries the cheap parent-inheritance fallback; this is
+	// where the expensive one (OpenProcess + a full Toolhelp32 snapshot
+	// walk) actually runs, off the ETW dispatch hot path. Push the
+	// resolved identity to the UI immediately even if we don't get as far
+	// as a signature check below (e.g. the file has since been deleted).
+	if p.Name == "" {
+		if qb := queryBasic(pid); qb.Name != "" {
+			c.mu.Lock()
+			if p2, ok := c.m[pid]; ok && p2.Name == "" {
+				p2.Name = qb.Name
+				if p2.ImagePath == "" {
+					p2.ImagePath = qb.ImagePath
+				}
+				if p2.PPID == 0 {
+					p2.PPID = qb.PPID
+				}
+				c.applyHeuristics(p2)
+				p = p2
+			}
+			c.mu.Unlock()
+			if c.onUpdate != nil {
+				c.onUpdate(*p)
+			}
+		}
+	}
+
+	if p.ImagePath == "" {
+		return // nothing to check a signature/hash against
 	}
 	key := strings.ToLower(p.ImagePath)
 

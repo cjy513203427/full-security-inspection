@@ -41,6 +41,17 @@ type connSample struct {
 	at time.Time
 }
 
+// beaconKey identifies one (process, destination) pair for beacon
+// tracking. A struct key rather than a formatted string avoids both an
+// allocation per connect event and a subtler bug: keying on ProcName as
+// well would silently fragment a single process's history into two
+// buckets if its name resolves asynchronously (empty, then populated)
+// between connects to the same address.
+type beaconKey struct {
+	pid  uint32
+	addr string
+}
+
 type Engine struct {
 	procs   *procinfo.Cache
 	targets []config.SensitiveTarget
@@ -50,10 +61,11 @@ type Engine struct {
 	onDNS   func(model.DNSEvent)
 	onAlert func(model.Alert)
 
-	mu          sync.Mutex
-	recentTouch map[uint32][]fileTouch
-	dnsByIP     map[string]dnsRecord
-	connHistory map[string][]connSample
+	mu           sync.Mutex
+	recentTouch  map[uint32][]fileTouch
+	dnsByIP      map[string]dnsRecord
+	connHistory  map[beaconKey][]connSample
+	sweepCounter uint64 // opportunistic-sweep cadence, see maybeSweepLocked
 
 	fileSeq  uint64
 	netSeq   uint64
@@ -78,7 +90,7 @@ func New(procs *procinfo.Cache, h Handlers) *Engine {
 		onAlert:     h.OnAlert,
 		recentTouch: make(map[uint32][]fileTouch),
 		dnsByIP:     make(map[string]dnsRecord),
-		connHistory: make(map[string][]connSample),
+		connHistory: make(map[beaconKey][]connSample),
 	}
 }
 
@@ -196,6 +208,7 @@ func (e *Engine) HandleNet(ne model.NetEvent) {
 		touches = pruneTouchesAt(e.recentTouch[ne.PID], ne.Time)
 		e.recentTouch[ne.PID] = touches
 	}
+	e.maybeSweepLocked(ne.Time)
 	e.mu.Unlock()
 
 	if e.onNet != nil {
@@ -330,7 +343,7 @@ func (e *Engine) trackBeacon(ne model.NetEvent, proc model.ProcessInfo) {
 	if proc.Known {
 		return // browsers/known apps legitimately keep-alive on a schedule
 	}
-	key := ne.ProcName + "|" + fmt.Sprint(ne.PID) + "|" + ne.RemoteAddr
+	key := beaconKey{pid: ne.PID, addr: ne.RemoteAddr}
 
 	e.mu.Lock()
 	cutoff := ne.Time.Add(-config.BeaconWindowSeconds * time.Second)
@@ -397,8 +410,51 @@ func (e *Engine) trackBeacon(ne model.NetEvent, proc model.ProcessInfo) {
 	}
 
 	e.mu.Lock()
-	e.connHistory[key] = nil // avoid re-alerting on every subsequent connect
+	delete(e.connHistory, key) // avoid re-alerting on every subsequent connect; a fresh entry starts cleanly if it beacons again
 	e.mu.Unlock()
+}
+
+// sweepIntervalEvents is how often (in HandleNet calls) maybeSweepLocked
+// actually does anything, rather than every single call.
+const sweepIntervalEvents = 200
+
+// maybeSweepLocked evicts time-expired entries from the correlation maps.
+// Callers must already hold e.mu.
+//
+// Without this, a monitor left running for weeks (which is the whole
+// point of this tool) would accumulate one dnsByIP/connHistory/recentTouch
+// entry for every distinct resolved IP and every distinct (process,
+// destination) pair it has EVER seen — forever. Each of those three maps
+// only prunes the *contents* of a given key's slice on its own; a key that
+// simply stops being visited (the process exits, or just stops talking to
+// that address) has nothing left to trigger its own removal, so this does
+// a periodic sweep instead of relying on that.
+func (e *Engine) maybeSweepLocked(now time.Time) {
+	e.sweepCounter++
+	if e.sweepCounter%sweepIntervalEvents != 0 {
+		return
+	}
+
+	dnsCutoff := now.Add(-config.DNSCacheWindowSeconds * time.Second)
+	for ip, rec := range e.dnsByIP {
+		if rec.at.Before(dnsCutoff) {
+			delete(e.dnsByIP, ip)
+		}
+	}
+
+	beaconCutoff := now.Add(-config.BeaconWindowSeconds * time.Second)
+	for key, samples := range e.connHistory {
+		if len(samples) == 0 || samples[len(samples)-1].at.Before(beaconCutoff) {
+			delete(e.connHistory, key)
+		}
+	}
+
+	touchCutoff := now.Add(-config.CorrelationWindowSeconds * time.Second)
+	for pid, touches := range e.recentTouch {
+		if len(touches) == 0 || touches[len(touches)-1].at.Before(touchCutoff) {
+			delete(e.recentTouch, pid)
+		}
+	}
 }
 
 // HandleDNS processes a domain resolution event and feeds the IP->domain

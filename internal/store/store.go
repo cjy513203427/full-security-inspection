@@ -2,8 +2,9 @@
 // dashboard: bounded in-memory ring buffers for fast initial page loads,
 // append-only JSONL files on disk so nothing is lost once the ring buffer
 // wraps (this is what makes the tool useful for after-the-fact forensics,
-// not just a live view), and a simple pub/sub hub so the web server can
-// push new events over WebSocket as they happen.
+// not just a live view), and a simple pub/sub hub that cmd/netwatch relays
+// into the Wails frontend as it runs — Store itself doesn't know Wails
+// exists, it's just a plain publisher.
 package store
 
 import (
@@ -11,18 +12,37 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"netwatch/internal/model"
 )
 
-// Envelope is the shape every event takes on the WebSocket feed.
+// Envelope is the shape every event takes on the pub/sub feed.
 type Envelope struct {
-	Type string      `json:"type"` // "net" | "dns" | "file" | "alert" | "proc"
-	Data interface{} `json:"data"`
+	Type string `json:"type"` // "net" | "dns" | "file" | "alert" | "proc"
+	Data any    `json:"data"`
 }
 
 const ringSize = 5000
 const alertRingSize = 2000
+
+// A monitor that's meant to run for weeks needs bounded log files, not
+// just bounded in-memory state — LogMaxBytes/LogMaxBackups are the JSONL
+// event logs' rotation settings (see RotatingFile in rotate.go). Worst
+// case per file: LogMaxBytes * (LogMaxBackups+1); four JSONL logs at the
+// defaults below is at most ~320MB total, which is generous for forensic
+// history without being "the disk just fills up eventually".
+const LogMaxBytes = 20 << 20 // 20MB
+const LogMaxBackups = 3
+
+// A 24/7-running monitor will eventually observe far more processes than
+// anyone needs kept around once they've exited — procExitRetention bounds
+// that growth by sweeping old exited entries out of the map periodically
+// (see sweepExitedProcsLocked), rather than keeping every process this
+// tool has ever seen for the life of the run.
+const procExitRetention = 2 * time.Hour
+const procSweepEvery = 500 // opportunistic sweep cadence, in UpdateProc calls
 
 type Store struct {
 	mu     sync.RWMutex
@@ -31,6 +51,8 @@ type Store struct {
 	files  []model.SensitiveFileEvent
 	alerts []model.Alert
 	procs  map[uint32]model.ProcessInfo
+
+	procUpdateCount uint64
 
 	logDir   string
 	netLog   *jsonlWriter
@@ -41,7 +63,12 @@ type Store struct {
 	subMu sync.Mutex
 	subs  map[chan Envelope]struct{}
 
-	CriticalCount int64 // unacknowledged critical/high alerts, for the tray icon
+	// criticalCount is read from a different goroutine (the tray icon
+	// poller) than it's written from (the ETW/correlation pipeline, and
+	// whatever goroutine Wails dispatches AckAlert calls on) — atomic.Int64
+	// makes that a compile-time-enforced property instead of a convention
+	// that a future plain-field access could quietly violate.
+	criticalCount atomic.Int64
 }
 
 func New(dataDir string) (*Store, error) {
@@ -108,7 +135,7 @@ func (s *Store) AddAlert(a model.Alert) {
 	s.mu.Unlock()
 	s.alertLog.Write(a)
 	if a.Severity == model.SevCritical || a.Severity == model.SevHigh {
-		s.CriticalCount++
+		s.criticalCount.Add(1)
 	}
 	s.publish(Envelope{Type: "alert", Data: a})
 }
@@ -116,8 +143,25 @@ func (s *Store) AddAlert(a model.Alert) {
 func (s *Store) UpdateProc(p model.ProcessInfo) {
 	s.mu.Lock()
 	s.procs[p.PID] = p
+	s.procUpdateCount++
+	if s.procUpdateCount%procSweepEvery == 0 {
+		s.sweepExitedProcsLocked()
+	}
 	s.mu.Unlock()
 	s.publish(Envelope{Type: "proc", Data: p})
+}
+
+// sweepExitedProcsLocked drops processes that exited more than
+// procExitRetention ago. Callers must hold s.mu. Without this, a monitor
+// left running for weeks would accumulate every process it ever observed
+// — thousands of short-lived helper processes — forever.
+func (s *Store) sweepExitedProcsLocked() {
+	cutoff := time.Now().Add(-procExitRetention)
+	for pid, p := range s.procs {
+		if p.Exited && p.ExitTime.Before(cutoff) {
+			delete(s.procs, pid)
+		}
+	}
 }
 
 // AckAlert marks an alert acknowledged (dismissed from the "needs
@@ -128,13 +172,20 @@ func (s *Store) AckAlert(seq uint64) {
 	for i := range s.alerts {
 		if s.alerts[i].Seq == seq && !s.alerts[i].Ack {
 			s.alerts[i].Ack = true
-			if s.CriticalCount > 0 && (s.alerts[i].Severity == model.SevCritical || s.alerts[i].Severity == model.SevHigh) {
-				s.CriticalCount--
+			if s.alerts[i].Severity == model.SevCritical || s.alerts[i].Severity == model.SevHigh {
+				s.criticalCount.Add(-1)
 			}
 			break
 		}
 	}
 	s.mu.Unlock()
+}
+
+// UnacknowledgedCriticalCount returns the number of unacknowledged
+// critical/high alerts. Safe to call from any goroutine — it's what the
+// tray-icon color poller reads.
+func (s *Store) UnacknowledgedCriticalCount() int64 {
+	return s.criticalCount.Load()
 }
 
 // --- readers -------------------------------------------------------------
@@ -225,34 +276,36 @@ func lastN[T any](s []T, n int) []T {
 	return out
 }
 
+// jsonlWriter is a thin JSON-encoding layer over a RotatingFile — the
+// rotation mechanics live in rotate.go, shared with cmd/netwatch's
+// plain-text log.
 type jsonlWriter struct {
-	mu  sync.Mutex
-	f   *os.File
-	enc *json.Encoder
+	rf *RotatingFile
 }
 
 func newJSONLWriter(path string) (*jsonlWriter, error) {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	rf, err := NewRotatingFile(path, LogMaxBytes, LogMaxBackups)
 	if err != nil {
 		return nil, err
 	}
-	return &jsonlWriter{f: f, enc: json.NewEncoder(f)}, nil
+	return &jsonlWriter{rf: rf}, nil
 }
 
-func (w *jsonlWriter) Write(v interface{}) {
+func (w *jsonlWriter) Write(v any) {
 	if w == nil {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	_ = w.enc.Encode(v) // best-effort; a full disk shouldn't crash the monitor
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	b = append(b, '\n')
+	_, _ = w.rf.Write(b) // best-effort; a full disk shouldn't crash the monitor
 }
 
 func (w *jsonlWriter) Close() {
 	if w == nil {
 		return
 	}
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.f.Close()
+	_ = w.rf.Close()
 }

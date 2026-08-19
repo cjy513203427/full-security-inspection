@@ -107,7 +107,7 @@
       state.conns = snap.nets || [];
       state.files = snap.files || [];
       state.dns = snap.dns || [];
-      (snap.procs || []).forEach(p => state.procs.set(p.pid, p));
+      (snap.procs || []).forEach(upsertProc);
       markSeen();
     } catch (e) {
       console.error('snapshot load failed', e);
@@ -125,39 +125,63 @@
     state.dns.forEach(d => state.seenSeq.dns.add(d.seq));
   }
 
+  // This tool is meant to run for weeks at a time, so "cap the array, but
+  // never shrink the dedup Set that tracks it" would be a slow, real
+  // memory leak — every popped array entry's seq has to come out of
+  // seenSeq too, or the Set just grows forever even though the array
+  // stays a fixed size.
+  const ARRAY_CAPS = { alert: 2000, net: 3000, file: 3000, dns: 3000 };
+
+  function pushDeduped(type, arr, item) {
+    const seen = state.seenSeq[type];
+    if (seen.has(item.seq)) return false;
+    seen.add(item.seq);
+    arr.unshift(item);
+    if (arr.length > ARRAY_CAPS[type]) {
+      const dropped = arr.pop();
+      seen.delete(dropped.seq);
+    }
+    return true;
+  }
+
+  // Same idea for the process table: state.procs is a Map that would
+  // otherwise keep every PID ever observed for the life of the window.
+  // The backend already retires long-exited processes from its own store
+  // (see internal/store's procExitRetention), but that only stops it from
+  // sending more updates for them — it doesn't reach into what the
+  // frontend already cached, so the frontend bounds itself independently.
+  const PROC_CAP = 5000;
+
+  function upsertProc(p) {
+    if (!state.procs.has(p.pid) && state.procs.size >= PROC_CAP) {
+      // Map iteration order is insertion order; the first key is simply
+      // the PID we've held onto the longest.
+      state.procs.delete(state.procs.keys().next().value);
+    }
+    state.procs.set(p.pid, p);
+  }
+
   function applyEnvelope(env) {
     switch (env.type) {
       case 'alert':
-        if (state.seenSeq.alert.has(env.data.seq)) return;
-        state.seenSeq.alert.add(env.data.seq);
-        state.alerts.unshift(env.data);
-        state.alerts.length > 2000 && state.alerts.pop();
+        if (!pushDeduped('alert', state.alerts, env.data)) return;
         scheduleRender('alerts');
         maybeNotify(env.data);
         break;
       case 'net':
-        if (state.seenSeq.net.has(env.data.seq)) return;
-        state.seenSeq.net.add(env.data.seq);
-        state.conns.unshift(env.data);
-        state.conns.length > 3000 && state.conns.pop();
+        if (!pushDeduped('net', state.conns, env.data)) return;
         scheduleRender('conns');
         break;
       case 'file':
-        if (state.seenSeq.file.has(env.data.seq)) return;
-        state.seenSeq.file.add(env.data.seq);
-        state.files.unshift(env.data);
-        state.files.length > 3000 && state.files.pop();
+        if (!pushDeduped('file', state.files, env.data)) return;
         scheduleRender('files');
         break;
       case 'dns':
-        if (state.seenSeq.dns.has(env.data.seq)) return;
-        state.seenSeq.dns.add(env.data.seq);
-        state.dns.unshift(env.data);
-        state.dns.length > 3000 && state.dns.pop();
+        if (!pushDeduped('dns', state.dns, env.data)) return;
         scheduleRender('dns');
         break;
       case 'proc':
-        state.procs.set(env.data.pid, env.data);
+        upsertProc(env.data);
         scheduleRender('procs');
         break;
     }

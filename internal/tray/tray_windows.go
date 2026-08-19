@@ -3,7 +3,7 @@
 // Package tray manages the Windows notification-area icon: a calm blue dot
 // while nothing is wrong, switching to red the moment there is an
 // unacknowledged high/critical alert, so a glance at the taskbar is enough
-// to know something needs attention without keeping the dashboard tab open.
+// to know something needs attention without keeping the dashboard window open.
 package tray
 
 import (
@@ -30,7 +30,7 @@ func onReady(onOpen func(), onQuit func()) {
 	systray.SetIcon(iconNormal)
 	systray.SetTooltip("NetWatch CookieGuard - 正常监控中")
 
-	open := systray.AddMenuItem("打开监控面板", "在浏览器中打开仪表盘")
+	open := systray.AddMenuItem("打开监控面板", "显示监控窗口")
 	systray.AddSeparator()
 	status := systray.AddMenuItem("状态: 正常监控中", "")
 	status.Disable()

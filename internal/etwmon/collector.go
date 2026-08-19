@@ -19,7 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -62,10 +62,10 @@ type Collector struct {
 }
 
 // New creates a Collector. selfPID is excluded from network/file reporting
-// so the tool does not alert on its own dashboard HTTP traffic and log
-// writes. debugETWPath, if non-empty, receives one JSON line per raw event
-// seen by the collector's four providers (verbose — for field-mapping
-// diagnostics only).
+// so the tool does not alert on its own log/JSONL writes and (pre-Wails)
+// housekeeping. debugETWPath, if non-empty, receives one JSON line per raw
+// event seen by the collector's four providers (verbose — for
+// field-mapping diagnostics only).
 func New(h Handlers, selfPID uint32, debugETWPath string) (*Collector, error) {
 	c := &Collector{h: h, selfPID: selfPID}
 	if debugETWPath != "" {
@@ -331,9 +331,14 @@ func (c *Collector) handleDNS(e *etw.Event) {
 		if part == "" {
 			continue
 		}
-		// QueryResults mixes CNAMEs and IPs; keep entries that look like an
-		// IP address (contain a dot or colon and no letters other than
-		// hex/IPv6) — good enough for display purposes.
+		// QueryResults mixes CNAME-chain entries (e.g. "type: 5
+		// some.cdn.example.com") in with the actual resolved IPs; only the
+		// IPs are useful here — the correlation engine uses this list to
+		// key its IP->domain map, so a CNAME text entry sneaking through
+		// would just become permanent dead weight in that map.
+		if net.ParseIP(part) == nil {
+			continue
+		}
 		results = append(results, part)
 	}
 	pid := e.System.Execution.ProcessID
@@ -351,5 +356,3 @@ func (c *Collector) handleDNS(e *etw.Event) {
 		c.h.OnDNS(de)
 	}
 }
-
-var _ = log.Println

@@ -280,3 +280,46 @@ func TestNoBeaconAlert_KnownBrowser(t *testing.T) {
 		t.Fatalf("known browser should not trigger beaconing alert, got %+v", got)
 	}
 }
+
+// A monitor left running for weeks must not accumulate one
+// dnsByIP/connHistory/recentTouch entry per distinct IP/process/pair it
+// has ever seen forever — maybeSweepLocked's periodic eviction is what
+// bounds that. Seed clearly-stale entries directly, then drive enough
+// unrelated HandleNet calls to cross the sweep threshold, and confirm the
+// stale entries are gone while nothing crashes for the entries that do get
+// touched along the way.
+func TestMaybeSweepEvictsStaleEntries(t *testing.T) {
+	e, _ := newTestEngine()
+
+	const staleProcPID = 92001
+	old := time.Now().Add(-2 * time.Hour) // far past every cutoff this package uses
+
+	e.mu.Lock()
+	e.dnsByIP["203.0.113.200"] = dnsRecord{domain: "stale.example.com", at: old}
+	e.connHistory[beaconKey{pid: staleProcPID, addr: "203.0.113.201"}] = []connSample{{at: old}}
+	e.recentTouch[staleProcPID] = []fileTouch{{at: old}}
+	e.mu.Unlock()
+
+	for i := 0; i < sweepIntervalEvents; i++ {
+		e.HandleNet(model.NetEvent{
+			PID: 1, Time: time.Now(), Proto: "TCP", Direction: "connect",
+			RemoteAddr: "198.51.100.1", RemotePort: 443,
+		})
+	}
+
+	e.mu.Lock()
+	_, dnsStillThere := e.dnsByIP["203.0.113.200"]
+	_, beaconStillThere := e.connHistory[beaconKey{pid: staleProcPID, addr: "203.0.113.201"}]
+	_, touchStillThere := e.recentTouch[staleProcPID]
+	e.mu.Unlock()
+
+	if dnsStillThere {
+		t.Error("expected stale dnsByIP entry to be swept")
+	}
+	if beaconStillThere {
+		t.Error("expected stale connHistory entry to be swept")
+	}
+	if touchStillThere {
+		t.Error("expected stale recentTouch entry to be swept")
+	}
+}

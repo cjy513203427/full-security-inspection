@@ -126,6 +126,9 @@ var (
 	procFindWindowW      = user32.NewProc("FindWindowW")
 	procShowWindow       = user32.NewProc("ShowWindow")
 	procSetForegroundWnd = user32.NewProc("SetForegroundWindow")
+
+	kernel32             = syscall.NewLazyDLL("kernel32.dll")
+	procGetConsoleWindow = kernel32.NewProc("GetConsoleWindow")
 )
 
 func findWindow(windowName *uint16) uintptr {
@@ -141,6 +144,19 @@ func setForegroundWindow(hwnd uintptr) {
 	_, _, _ = procSetForegroundWnd.Call(hwnd)
 }
 
+// hasConsole reports whether this process is attached to a console window
+// — true for netwatch-debug.exe run from an actual terminal (where a
+// fmt.Println is already visible), false for the windowsgui release build
+// double-clicked from Explorer (where a message box is the only way to
+// show anything) and also false for any non-interactive/background
+// invocation. Used to skip popping a confirmation dialog when the console
+// output already covers it — a modal box with nobody there to click it
+// would otherwise just hang the process.
+func hasConsole() bool {
+	ret, _, _ := procGetConsoleWindow.Call()
+	return ret != 0
+}
+
 const (
 	mbOK            = 0x00000000
 	mbIconError     = 0x00000010
@@ -149,15 +165,29 @@ const (
 	mbSetForeground = 0x00010000
 )
 
-// showErrorBox / showInfoBox surface a message even when running under the
-// windowsgui subsystem (no console for log output to appear on) — used
-// only for the handful of startup conditions a user actually needs to see
-// and react to.
+// showErrorBox surfaces a message even when running under the windowsgui
+// subsystem (no console for log output to appear on). Always shown,
+// console or not — a fatal error is rare and important enough to warrant
+// the belt-and-suspenders visibility, and fatalWithBox already calls
+// log.Print alongside it for the console case.
 func showErrorBox(title, msg string) {
 	messageBox(title, msg, mbIconError)
 }
 
+// showInfoBox is for routine one-off confirmations (-install-autostart,
+// -clean-logs, ...) that also already print to stdout. It's skipped
+// whenever a console is attached, for two reasons: the printed text is
+// already visible there, and — more importantly — MessageBox blocks until
+// someone clicks it, so if this were ever invoked from a non-interactive
+// context (a script, a scheduled task, this tool's own test suite) with no
+// console and no one to click "OK", the process would just hang forever.
+// hasConsole() is an imperfect proxy for "interactive", but it's the same
+// signal that correctly separates "run from Explorer" (needs the popup)
+// from "run from a terminal" (doesn't).
 func showInfoBox(title, msg string) {
+	if hasConsole() {
+		return
+	}
 	messageBox(title, msg, mbIconInfo)
 }
 

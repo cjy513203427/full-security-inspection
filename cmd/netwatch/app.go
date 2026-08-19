@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"sync"
 
 	"netwatch/internal/model"
 	"netwatch/internal/store"
@@ -11,8 +12,18 @@ import (
 // callable from the frontend as window.go.main.App.<Method>(...), each
 // returning a Promise resolving to the JSON-marshaled return value.
 type App struct {
-	ctx context.Context
-	st  *store.Store
+	st *store.Store
+
+	// ctx is written once, from Wails' OnStartup callback, and read from
+	// other goroutines afterward (the tray icon's click handlers, the
+	// critical-count poller). Those reads can in principle happen before
+	// OnStartup ever fires (nothing prevents the tray icon from being
+	// clicked immediately on process start), so this needs real
+	// synchronization rather than a bare pointer field — a torn or
+	// stale read here would either panic or silently no-op a window
+	// show/quit request.
+	ctxMu sync.RWMutex
+	ctx   context.Context
 }
 
 func NewApp(st *store.Store) *App {
@@ -22,7 +33,17 @@ func NewApp(st *store.Store) *App {
 // startup is Wails' OnStartup hook target; ctx becomes usable for
 // runtime.EventsEmit/WindowShow/etc. only after this fires.
 func (a *App) startup(ctx context.Context) {
+	a.ctxMu.Lock()
 	a.ctx = ctx
+	a.ctxMu.Unlock()
+}
+
+// Context returns the Wails runtime context and true once startup has
+// completed, or (nil, false) if called before then.
+func (a *App) Context() (context.Context, bool) {
+	a.ctxMu.RLock()
+	defer a.ctxMu.RUnlock()
+	return a.ctx, a.ctx != nil
 }
 
 // Snapshot is the initial-load payload the dashboard fetches once on
