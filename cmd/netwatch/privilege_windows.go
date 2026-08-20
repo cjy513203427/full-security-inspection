@@ -6,6 +6,8 @@ import (
 	"log"
 
 	"golang.org/x/sys/windows"
+
+	"netwatch/internal/i18n"
 )
 
 // enableDebugPrivilege turns on SeDebugPrivilege for the current process
@@ -22,14 +24,14 @@ import (
 func enableDebugPrivilege() {
 	var token windows.Token
 	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, &token); err != nil {
-		log.Printf("警告: 打开进程令牌失败,部分沙箱化子进程(如 Chrome 的网络服务进程)可能无法识别名称: %v", err)
+		log.Printf(i18n.T("log.open_token_failed"), err)
 		return
 	}
 	defer token.Close()
 
 	var luid windows.LUID
 	if err := windows.LookupPrivilegeValue(nil, windows.StringToUTF16Ptr("SeDebugPrivilege"), &luid); err != nil {
-		log.Printf("警告: 查找 SeDebugPrivilege 失败: %v", err)
+		log.Printf(i18n.T("log.lookup_privilege_failed"), err)
 		return
 	}
 
@@ -42,6 +44,6 @@ func enableDebugPrivilege() {
 	}
 
 	if err := windows.AdjustTokenPrivileges(token, false, &priv, 0, nil, nil); err != nil {
-		log.Printf("警告: 启用 SeDebugPrivilege 失败(可能不是管理员): %v", err)
+		log.Printf(i18n.T("log.enable_privilege_failed"), err)
 	}
 }

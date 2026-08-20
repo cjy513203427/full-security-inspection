@@ -42,8 +42,8 @@ go vet ./...
   build tags" error box at runtime instead of the real app. `debug` is additive on top of it (just
   raises Wails' log verbosity) — never a substitute for `production`.
 - `CGO_ENABLED=0` throughout; nothing here needs a C compiler (ETW via `golang.org/x/sys/windows`
-  syscalls, WebView2 via Wails' pure-Go `go-webview2` binding, tray via `getlantern/systray`).
-- Windows/amd64 only — most non-`cmd`/`config`/`model`/`store` source files carry `//go:build
+  syscalls, WebView2 via Wails' pure-Go `go-webview2` binding, tray via `energye/systray`).
+- Windows/amd64 only — most non-`cmd`/`config`/`model`/`store`/`i18n` source files carry `//go:build
   windows` deliberately; don't try to make this cross-platform.
 - Running the actual monitor requires Administrator (UAC self-elevation happens in `main()`); ETW
   session creation fails without it. Most local dev/test iteration doesn't need elevation — only
@@ -98,7 +98,19 @@ instead cover everything around them:
   block publishers.
 - [internal/procinfo/procinfo_test.go](internal/procinfo/procinfo_test.go) — OS-query fallback path
   using the test process's own real PID.
-- [internal/web/assets_test.go](internal/web/assets_test.go) — embedded dashboard assets present.
+- [internal/web/assets_test.go](internal/web/assets_test.go) — embedded dashboard assets present
+  (`index.html`, `app.js`, `i18n.js`, `style.css`).
+- [internal/certcheck/certcheck_test.go](internal/certcheck/certcheck_test.go) — the pure
+  decision logic (`toAlert` severity tiers, baseline drift tracking) with synthetic
+  `model.CertCheckEvent`s; the actual TLS dial/verify (`probe`) needs real network access so isn't
+  covered here — it was validated manually against real domains during development instead.
+- [internal/i18n/i18n_test.go](internal/i18n/i18n_test.go) — every catalog key has all three
+  languages, and multi-argument templates' `%[n]` indices match across languages (catches a
+  translation that silently drops or duplicates a placeholder), plus `T`/`ParseLang`/`SetSession`
+  behavior. The dashboard-side catalog ([internal/web/static/i18n.js](internal/web/static/i18n.js))
+  has no Go test coverage since it's plain JS — it was cross-checked ad hoc for the same
+  invariants (key parity across languages, every `data-i18n`/`i18n.T()` reference resolving to a
+  real key) during development instead.
 
 ## Architecture: the event pipeline
 
@@ -107,9 +119,9 @@ Everything flows one direction, wired together in [cmd/netwatch/main.go](cmd/net
 ```
 internal/etwmon (ETW kernel events)
     → internal/procinfo (PID → name/path/signature/hash cache)
-    → internal/correlate (scoring + alert synthesis)
-    → internal/store (ring buffers + JSONL + pub/sub)
-    → Wails event bridge → internal/web dashboard (WebView2)
+    → internal/correlate (scoring + alert synthesis)          ─┐
+                                                                 ├→ internal/store (ring buffers + JSONL + pub/sub)
+internal/certcheck (periodic active TLS probes) ────────────────┘      → Wails event bridge → internal/web dashboard (WebView2)
 ```
 
 - **`internal/etwmon`** ([collector.go](internal/etwmon/collector.go)) opens one real-time ETW
@@ -146,23 +158,96 @@ internal/etwmon (ETW kernel events)
   `correlate` (`CorrelationWindowSeconds`, beacon params, DNS cache window). **Change detection
   scope/sensitivity here, not in engine.go.** Patterns are deliberately drive-letter-agnostic
   (`\users\...` not `C:\Users\...`) because ETW sometimes reports NT device paths.
+- **`internal/certcheck`** ([certcheck.go](internal/certcheck/certcheck.go)) is the one part of
+  this tool that initiates its own outbound connections rather than passively observing everyone
+  else's via ETW — a periodic ticker (`config.CertCheckIntervalSeconds`, default 10min) TLS-dials
+  a handful of domains (`config.CertCheckTargets()`) and verifies the presented certificate chain
+  against **two independent pools**: the OS trust store, and a bundled, fixed snapshot of the
+  public Mozilla/curl CA list ([assets/cacert.pem](internal/certcheck/assets/cacert.pem)). This
+  exists because a MITM proxy that has gotten its root CA silently trusted by the OS is a total
+  blind spot for everything else in this pipeline — the browser shows no warning, no process
+  reads a credential file it shouldn't, nothing "beacons". OS-trusted-but-not-in-the-public-list is
+  the actual signal. Issuer strings are also matched against `config.KnownInterceptionVendors`
+  (Zscaler/Netskope/Palo Alto/... → high severity, names the product) and
+  `config.KnownConsumerAVRoots` (Kaspersky/Avast/... → informational, not the same threat as a
+  network-level interceptor) separately, plus a per-domain baseline
+  (`certcheck_baseline.json` in the data dir) flags drift even against vendors neither list knows
+  about — but only a chain that itself verified against the public-CA pool is ever allowed to
+  become the new baseline, so an active MITM can't "bless itself" as the new normal. Alerts flow
+  through the same `model.Alert`/`Store.AddAlert` pipeline as `correlate`'s (see the Seq note on
+  `Store.AddAlert` below), carrying no PID — this finding isn't process-scoped, and the frontend
+  skips the process chip when `pid` is absent for exactly that reason. Turn it off with
+  `-disable-cert-check`. `assets/cacert.pem` is a frozen snapshot (not re-fetched at runtime, so a
+  compromised network can't hand it a fake update) — refresh it occasionally via
+  `curl -sS https://curl.se/ca/cacert.pem -o internal/certcheck/assets/cacert.pem`.
 - **`internal/store`** ([store.go](internal/store/store.go)) holds bounded in-memory ring buffers
-  per event type (5000 events, 2000 alerts) for fast dashboard reloads, appends everything to
-  rotating JSONL files on disk (`internal/store/rotate.go`, 20MB × 3 backups per file, shared with
-  `netwatch.log`) so history survives restarts/ring wraparound, and runs a plain channel-based
-  pub/sub hub. Store has no knowledge of Wails; `cmd/netwatch/main.go`'s `forwardStoreEvents`
-  relays its `Envelope`s into `wailsRuntime.EventsEmit`.
+  per event type (5000 events, 2000 alerts, 1000 cert checks) for fast dashboard reloads, appends
+  everything to rotating JSONL files on disk (`internal/store/rotate.go`, 20MB × 3 backups per
+  file, shared with `netwatch.log`) so history survives restarts/ring wraparound, and runs a plain
+  channel-based pub/sub hub. Store has no knowledge of Wails; `cmd/netwatch/main.go`'s
+  `forwardStoreEvents` relays its `Envelope`s into `wailsRuntime.EventsEmit`. `AddAlert` is the
+  single authority for `Alert.Seq` — it overwrites whatever the caller set, from one counter
+  shared across every alert producer. That's deliberate now that there are two (`correlate` and
+  `certcheck`): the frontend's ack/dedup logic keys everything off `Seq` being unique across the
+  *whole* alert stream, so two producers each keeping their own counter would eventually collide.
+  Producers should just leave `Seq` unset and let `AddAlert` assign it.
 - **`cmd/netwatch`**: `main.go` wires the whole pipeline and owns the Wails `options.App` config;
-  `app.go` is the Wails-bound object (`App.GetSnapshot`, `App.AckAlert` — exported methods become
-  `window.go.main.App.<Method>()` promises on the JS side); `elevate_windows.go` /
+  `app.go` is the Wails-bound object (`App.GetSnapshot`, `App.AckAlert`, `App.GetLanguage`,
+  `App.SetLanguage` — exported methods become `window.go.main.App.<Method>()` promises on the JS
+  side); `elevate_windows.go` /
   `privilege_windows.go` handle UAC self-relaunch and enabling `SeDebugPrivilege` (needed to open
   handles to browser sandboxed subprocesses — without it they show up as unidentifiable processes
   touching the browser's own cookie file, a false positive this fixes at the source);
   `autostart_windows.go` manages the scheduled-task-based autostart.
+- **`internal/i18n`** ([i18n.go](internal/i18n/i18n.go), [catalog.go](internal/i18n/catalog.go)) is
+  the backend's translation layer — Chinese/English/German (`ZH`/`EN`/`DE`), one active `Lang` for
+  the whole process, read by every `T(key, args...)` call. Covers everything the Go side produces
+  in a human-facing string: CLI flag help (built in `main()`, so `i18n.Init()` must run before any
+  `flag.String`/`flag.Bool` call), startup/log messages and message boxes, the tray menu
+  (`internal/tray`'s `Relabel()`), and every `correlate`/`certcheck` alert's `Title`/`Detail`
+  (`config.SensitiveTarget.AppKey`+`AppArgs` resolves a target's display name lazily via
+  `config.TargetAppName` at alert time, not baked in at `SensitiveTargets()` call time, so a
+  live language switch is reflected in the very next alert rather than only after a restart).
+  `Init()` resolves the starting language from a persisted preference
+  (`%LOCALAPPDATA%\NetWatchCookieGuard\language.json`, independent of `-data-dir` since flag
+  descriptions need a language before `flag.Parse()` has even run) or else the detected Windows UI
+  language (`detect_windows.go`, raw `GetUserDefaultUILanguage` via `syscall` — not wrapped by
+  `x/sys/windows`); `Set()` changes it and persists, `SetSession()` changes it for this run only
+  (used by the `-lang` override flag). **Deliberately does not support retroactively
+  re-translating already-generated text**: an alert's `Title`/`Detail` (and each `netwatch.log`
+  line) is plain text rendered once, in whatever language was active at that moment — matching how
+  every other piece of this tool's history already behaves (an append-only audit trail, not a
+  live view) — so switching languages only changes what gets generated *from that point on*.
+  Multi-argument catalog templates use explicit argument indices (`%[1]s`, `%[2]d`...) rather than
+  positional order, since a natural translation often reorders words relative to the source
+  Chinese. The dashboard's own static/dynamic DOM text is a *separate*, parallel catalog —
+  [internal/web/static/i18n.js](internal/web/static/i18n.js) — deliberately not derived from this
+  Go one: it covers different content (UI chrome: labels, table headers, chip text) and translates
+  instantly client-side with zero round-trip, rather than waiting on a Wails call. `App.SetLanguage`
+  is what keeps the two in sync going forward (see `internal/web/static/app.js`'s "language
+  switching" section for the full flow).
 - **`internal/web`**: static HTML/CSS/JS embedded via `go:embed` ([embed.go](internal/web/embed.go)),
   served to WebView2 through Wails' `assetserver` — zero external deps/CDN by design.
 - **`internal/tray`**: systray icon (blue = normal, red = unacknowledged critical/high alert);
-  color driven by a 2s poller in `main.go` reading `Store.UnacknowledgedCriticalCount()`.
+  color driven by a 2s poller in `main.go` reading `Store.UnacknowledgedCriticalCount()`. Left
+  click opens the dashboard directly; right click shows the menu (labels come from
+  `internal/i18n`'s `tray.open`/`tray.quit` keys, not hardcoded strings) — via `energye/systray`'s
+  `SetOnClick`/`SetOnRClick`, a fork of the original `getlantern/systray`
+  chosen specifically because it exposes those two separately (`getlantern/systray` shows the same
+  native menu on either click with no way to tell them apart). Both onOpen/onQuit are bounced onto
+  their own goroutine in `tray.onReady` — menu-item clicks and `SetOnClick`/`SetOnRClick` callbacks
+  run synchronously on the tray's own message-loop thread (called directly from `wndProc`), and
+  neither should ever block on the real work those callbacks do (Wails window calls, stopping the
+  ETW collector, closing log files...).
+  `tray.Run` calls `runtime.LockOSThread()` itself before `systray.Run` — required because
+  `cmd/netwatch/main.go` launches it on its own spawned goroutine (the main goroutine is Wails'),
+  and systray's own `runtime.LockOSThread()` (in its package `init()`) only pins whichever
+  goroutine happens to run package initialization, not a goroutine spawned later by our code.
+  Without this, the Go scheduler can migrate the tray's message-loop goroutine to a different OS
+  thread at any preemption point, orphaning the native window's message queue on the old thread —
+  this was the cause of the tray sometimes becoming unresponsive (right-click doing nothing) that
+  this now fixes. Don't remove it, and don't call `tray.Run` from anywhere except its own
+  dedicated goroutine.
 
 Single-instance behavior is enforced twice: an OS-level check
 (`acquireSingleInstance`/`focusExistingWindow` in `cmd/netwatch`) before any fallible startup work

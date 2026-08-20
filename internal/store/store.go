@@ -20,12 +20,18 @@ import (
 
 // Envelope is the shape every event takes on the pub/sub feed.
 type Envelope struct {
-	Type string `json:"type"` // "net" | "dns" | "file" | "alert" | "proc"
+	Type string `json:"type"` // "net" | "dns" | "file" | "alert" | "proc" | "certcheck"
 	Data any    `json:"data"`
 }
 
 const ringSize = 5000
 const alertRingSize = 2000
+
+// certCheckRingSize is much smaller than ringSize: certcheck only probes a
+// handful of domains every CertCheckIntervalSeconds (default 10 min), so
+// 5000 entries would hold weeks of history in memory for no benefit — the
+// JSONL log on disk is what actually needs to survive long-term.
+const certCheckRingSize = 1000
 
 // A monitor that's meant to run for weeks needs bounded log files, not
 // just bounded in-memory state — LogMaxBytes/LogMaxBackups are the JSONL
@@ -45,20 +51,22 @@ const procExitRetention = 2 * time.Hour
 const procSweepEvery = 500 // opportunistic sweep cadence, in UpdateProc calls
 
 type Store struct {
-	mu     sync.RWMutex
-	nets   []model.NetEvent
-	dns    []model.DNSEvent
-	files  []model.SensitiveFileEvent
-	alerts []model.Alert
-	procs  map[uint32]model.ProcessInfo
+	mu         sync.RWMutex
+	nets       []model.NetEvent
+	dns        []model.DNSEvent
+	files      []model.SensitiveFileEvent
+	alerts     []model.Alert
+	certChecks []model.CertCheckEvent
+	procs      map[uint32]model.ProcessInfo
 
 	procUpdateCount uint64
 
-	logDir   string
-	netLog   *jsonlWriter
-	dnsLog   *jsonlWriter
-	fileLog  *jsonlWriter
-	alertLog *jsonlWriter
+	logDir       string
+	netLog       *jsonlWriter
+	dnsLog       *jsonlWriter
+	fileLog      *jsonlWriter
+	alertLog     *jsonlWriter
+	certCheckLog *jsonlWriter
 
 	subMu sync.Mutex
 	subs  map[chan Envelope]struct{}
@@ -69,6 +77,17 @@ type Store struct {
 	// makes that a compile-time-enforced property instead of a convention
 	// that a future plain-field access could quietly violate.
 	criticalCount atomic.Int64
+
+	// alertSeq is the single source of truth for Alert.Seq, deliberately
+	// owned here rather than by whichever engine raised the alert.
+	// correlate.Engine and internal/certcheck both produce model.Alert
+	// values now; the frontend's ack/dedup logic (and AckAlert below) keys
+	// everything off Seq being unique across the *whole* alert stream, so
+	// letting each producer keep its own counter would let two unrelated
+	// alerts collide on the same Seq. AddAlert overwrites whatever the
+	// caller set, so producers don't need to coordinate with each other at
+	// all — they just leave Seq unset.
+	alertSeq atomic.Uint64
 }
 
 func New(dataDir string) (*Store, error) {
@@ -93,6 +112,9 @@ func New(dataDir string) (*Store, error) {
 	if s.alertLog, err = newJSONLWriter(filepath.Join(dataDir, "alerts.jsonl")); err != nil {
 		return nil, err
 	}
+	if s.certCheckLog, err = newJSONLWriter(filepath.Join(dataDir, "certchecks.jsonl")); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -101,6 +123,7 @@ func (s *Store) Close() {
 	s.dnsLog.Close()
 	s.fileLog.Close()
 	s.alertLog.Close()
+	s.certCheckLog.Close()
 }
 
 // --- writers -----------------------------------------------------------
@@ -130,6 +153,7 @@ func (s *Store) AddFile(e model.SensitiveFileEvent) {
 }
 
 func (s *Store) AddAlert(a model.Alert) {
+	a.Seq = s.alertSeq.Add(1)
 	s.mu.Lock()
 	s.alerts = appendRing(s.alerts, a, alertRingSize)
 	s.mu.Unlock()
@@ -138,6 +162,14 @@ func (s *Store) AddAlert(a model.Alert) {
 		s.criticalCount.Add(1)
 	}
 	s.publish(Envelope{Type: "alert", Data: a})
+}
+
+func (s *Store) AddCertCheck(e model.CertCheckEvent) {
+	s.mu.Lock()
+	s.certChecks = appendRing(s.certChecks, e, certCheckRingSize)
+	s.mu.Unlock()
+	s.certCheckLog.Write(e)
+	s.publish(Envelope{Type: "certcheck", Data: e})
 }
 
 func (s *Store) UpdateProc(p model.ProcessInfo) {
@@ -212,6 +244,12 @@ func (s *Store) RecentAlerts(n int) []model.Alert {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return lastN(s.alerts, n)
+}
+
+func (s *Store) RecentCertChecks(n int) []model.CertCheckEvent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return lastN(s.certChecks, n)
 }
 
 func (s *Store) AllProcs() []model.ProcessInfo {

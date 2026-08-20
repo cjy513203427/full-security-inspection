@@ -95,6 +95,53 @@ type DNSEvent struct {
 	AIService string    `json:"aiService,omitempty"`
 }
 
+// CertCheckEvent records one periodic TLS probe against a watched domain
+// (internal/certcheck), evidence for the "is my HTTPS traffic being
+// intercepted" check — the one thing this tool observes actively rather
+// than passively via ETW, and the one blind spot process-behavior
+// correlation alone can never see (a MITM proxy re-signing certificates
+// with a root the OS already trusts produces no suspicious file/process/
+// network behavior at all).
+type CertCheckEvent struct {
+	Seq    uint64    `json:"seq"`
+	Time   time.Time `json:"time"`
+	Domain string    `json:"domain"`
+
+	// OK is false when the probe itself failed (network down, firewall,
+	// DNS failure, timeout...) rather than reporting on a certificate —
+	// Error holds why. Not a security signal by itself.
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+
+	IssuerCN    string `json:"issuerCN,omitempty"`
+	IssuerO     string `json:"issuerO,omitempty"`
+	RootSubject string `json:"rootSubject,omitempty"`
+
+	// TrustedPublicRoot is true when the presented chain verifies against
+	// our own bundled public-CA pool (independent of the OS trust store).
+	// False is the actual signal: the OS/WebView accepted a chain our own
+	// bundle does not — something added a root CA to this machine's trust
+	// store that isn't a standard public one.
+	TrustedPublicRoot bool `json:"trustedPublicRoot"`
+
+	// SuspectedVendor is set when IssuerCN/IssuerO matched a known
+	// enterprise SSL-inspection product's fingerprint (config.
+	// KnownInterceptionVendors) — high-confidence, names the product.
+	SuspectedVendor string `json:"suspectedVendor,omitempty"`
+
+	// SuspectedConsumerAV is set when the issuer instead matched a known
+	// consumer antivirus's local HTTPS-scanning root (config.
+	// KnownConsumerAVRoots) — same mechanism, far lower concern, kept
+	// separate so it isn't scored the same as an enterprise proxy.
+	SuspectedConsumerAV string `json:"suspectedConsumerAV,omitempty"`
+
+	// Changed is true when this domain's (issuer, root) pair differs from
+	// the last time it was seen trusted — catches novel interception setups
+	// that match neither fingerprint list, at the cost of one unavoidable
+	// false positive the very first time a domain legitimately rotates CAs.
+	Changed bool `json:"changed"`
+}
+
 // Alert is a synthesized, human readable warning produced by the
 // correlation engine from raw events.
 type Alert struct {

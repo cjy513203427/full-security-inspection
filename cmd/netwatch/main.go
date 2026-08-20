@@ -25,8 +25,10 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 
+	"netwatch/internal/certcheck"
 	"netwatch/internal/correlate"
 	"netwatch/internal/etwmon"
+	"netwatch/internal/i18n"
 	"netwatch/internal/model"
 	"netwatch/internal/procinfo"
 	"netwatch/internal/store"
@@ -41,18 +43,38 @@ import (
 const singleInstanceID = "netwatch-cookieguard-9f3e7b2a"
 
 func main() {
-	dataDir := flag.String("data-dir", defaultDataDir(), "日志/数据保存目录")
-	debugETW := flag.String("debug-etw", "", "可选:把所有原始 ETW 事件的 JSON 写入此文件,用于排查字段映射问题")
-	skipElevate := flag.Bool("skip-elevate", false, "跳过管理员自提权(仅用于调试界面本身;跳过后将看不到任何文件/网络事件)")
-	startHidden := flag.Bool("start-hidden", false, "启动时不显示窗口,只驻留在系统托盘(用于开机自启动场景,避免每次登录都弹窗)")
-	installAuto := flag.Bool("install-autostart", false, "注册开机/登录自启动计划任务,然后退出(不会立刻开始监控)")
-	uninstallAuto := flag.Bool("uninstall-autostart", false, "移除开机自启动计划任务,然后退出")
-	cleanLogs := flag.Bool("clean-logs", false, "清空历史日志文件(含所有 .jsonl 和已轮转的备份),释放磁盘空间,然后退出。若监控正在运行,请先在托盘图标里「退出监控」再执行")
+	// Must run before any flag.String/flag.Bool call below: their
+	// description text is built immediately, via i18n.T(), from whatever
+	// language Init() resolves (a persisted preference, else the Windows UI
+	// language) — including for -h/--help output, which never gets a chance
+	// to touch anything else in this file first.
+	i18n.Init()
+
+	dataDir := flag.String("data-dir", defaultDataDir(), i18n.T("flag.data_dir"))
+	debugETW := flag.String("debug-etw", "", i18n.T("flag.debug_etw"))
+	skipElevate := flag.Bool("skip-elevate", false, i18n.T("flag.skip_elevate"))
+	startHidden := flag.Bool("start-hidden", false, i18n.T("flag.start_hidden"))
+	installAuto := flag.Bool("install-autostart", false, i18n.T("flag.install_autostart"))
+	uninstallAuto := flag.Bool("uninstall-autostart", false, i18n.T("flag.uninstall_autostart"))
+	cleanLogs := flag.Bool("clean-logs", false, i18n.T("flag.clean_logs"))
+	disableCertCheck := flag.Bool("disable-cert-check", false, i18n.T("flag.disable_cert_check"))
+	langFlag := flag.String("lang", "", i18n.T("flag.lang"))
 	// Accepted for backward compatibility with scheduled tasks registered by
 	// older builds (pre-native-window); no longer meaningful, silently ignored.
-	flag.Bool("no-browser", false, "(已废弃,不再生效)")
-	flag.Int("port", 0, "(已废弃,不再生效——现在是原生窗口,不再监听端口)")
+	flag.Bool("no-browser", false, i18n.T("flag.deprecated_no_browser"))
+	flag.Int("port", 0, i18n.T("flag.deprecated_port"))
 	flag.Parse()
+
+	// A one-off override for this run only (doesn't persist — see
+	// i18n.SetSession's doc comment); the dashboard's language switcher is
+	// what persists a choice across launches.
+	if *langFlag != "" {
+		if l, ok := i18n.ParseLang(*langFlag); ok {
+			i18n.SetSession(l)
+		} else {
+			log.Printf("unrecognized -lang %q, ignoring (expected zh/en/de)", *langFlag)
+		}
+	}
 
 	// Doesn't touch anything that needs Administrator rights (it's just
 	// deleting the user's own files under %LOCALAPPDATA%), so this is
@@ -61,18 +83,18 @@ func main() {
 	if *cleanLogs {
 		freed, err := cleanLogFiles(*dataDir)
 		if err != nil {
-			fatalWithBox("清理日志失败: %v\n(如果监控正在运行,请先在托盘图标里点「退出监控」,再重新执行清理)", err)
+			fatalWithBox(i18n.T("log.clean_logs_failed"), err)
 		}
-		msg := fmt.Sprintf("已清空日志历史,释放约 %.1f MB 磁盘空间。", float64(freed)/(1<<20))
+		msg := i18n.T("log.clean_logs_done", float64(freed)/(1<<20))
 		fmt.Println(msg)
 		showInfoBox("NetWatch CookieGuard", msg)
 		return
 	}
 
 	if !*skipElevate && !isElevated() {
-		log.Println("当前不是管理员权限,正在请求 UAC 提权重启…")
+		log.Println(i18n.T("log.requesting_elevation"))
 		if err := relaunchElevated(); err != nil {
-			fatalWithBox("提权失败: %v\n请手动以管理员身份运行本程序,或者你在 UAC 弹窗里点了「否」。", err)
+			fatalWithBox(i18n.T("log.elevation_failed"), err)
 		}
 		return
 	}
@@ -80,21 +102,21 @@ func main() {
 	if *installAuto {
 		exe, err := os.Executable()
 		if err != nil {
-			fatalWithBox("获取自身路径失败: %v", err)
+			fatalWithBox(i18n.T("log.get_self_path_failed"), err)
 		}
 		if err := installAutostart(exe); err != nil {
-			fatalWithBox("注册自启动失败: %v", err)
+			fatalWithBox(i18n.T("log.install_autostart_failed"), err)
 		}
-		msg := "已注册开机自启动(登录时以管理员权限自动运行,不再弹 UAC;窗口默认隐藏,只在系统托盘)。可随时用 -uninstall-autostart 移除。"
+		msg := i18n.T("log.install_autostart_done")
 		fmt.Println(msg)
 		showInfoBox("NetWatch CookieGuard", msg)
 		return
 	}
 	if *uninstallAuto {
 		if err := uninstallAutostart(); err != nil {
-			fatalWithBox("移除自启动失败: %v", err)
+			fatalWithBox(i18n.T("log.uninstall_autostart_failed"), err)
 		}
-		msg := "已移除开机自启动计划任务。"
+		msg := i18n.T("log.uninstall_autostart_done")
 		fmt.Println(msg)
 		showInfoBox("NetWatch CookieGuard", msg)
 		return
@@ -119,7 +141,7 @@ func main() {
 	enableDebugPrivilege()
 
 	if err := os.MkdirAll(*dataDir, 0o755); err != nil {
-		fatalWithBox("无法创建数据目录 %s: %v", *dataDir, err)
+		fatalWithBox(i18n.T("log.mkdir_data_dir_failed"), *dataDir, err)
 	}
 
 	// The release build runs with the windowsgui subsystem (no console
@@ -137,13 +159,13 @@ func main() {
 	}
 
 	// Note: this process only ever leaves main() via os.Exit — either a
-	// startup fatalWithBox, or the tray "退出监控" handler below, which does
-	// its own explicit cleanup before exiting. Neither path returns
-	// normally, so `defer`s placed here would never actually run; cleanup
-	// is done explicitly instead of relying on them.
+	// startup fatalWithBox, or the tray quit handler below, which does its
+	// own explicit cleanup before exiting. Neither path returns normally, so
+	// `defer`s placed here would never actually run; cleanup is done
+	// explicitly instead of relying on them.
 	st, err := store.New(*dataDir)
 	if err != nil {
-		fatalWithBox("初始化存储失败: %v", err)
+		fatalWithBox(i18n.T("log.init_store_failed"), err)
 	}
 
 	selfPID := uint32(os.Getpid())
@@ -173,7 +195,7 @@ func main() {
 		OnDNS:  engine.HandleDNS,
 	}, selfPID, *debugETW)
 	if err != nil {
-		fatalWithBox("初始化 ETW 采集器失败: %v", err)
+		fatalWithBox(i18n.T("log.init_etw_failed"), err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -182,23 +204,42 @@ func main() {
 			// -skip-elevate is a UI-debugging escape hatch: keep the
 			// dashboard usable even though no events will ever arrive,
 			// instead of refusing to start.
-			log.Printf("警告: ETW 采集未启动 (%v) — 因为传入了 -skip-elevate,窗口仍会打开但不会有任何事件。", err)
+			log.Printf(i18n.T("log.etw_start_skipped"), err)
 		} else {
-			fatalWithBox("启动 ETW 采集失败: %v\n(需要以管理员身份运行;如果你确实是管理员还看到这个,请把 -debug-etw 的输出发给我排查)", err)
+			fatalWithBox(i18n.T("log.etw_start_failed"), err)
 		}
+	}
+
+	// certChecker is the one thing in this tool that initiates its own
+	// outbound connections (a handful of HTTPS probes every few minutes)
+	// rather than only passively observing everyone else's via ETW — see
+	// internal/certcheck's package doc for why. selfPID exclusion in
+	// etwmon.New above already keeps this process's own traffic out of the
+	// normal file/net event stream, so these probes never show up
+	// mislabeled as "a process phoning home".
+	var certChecker *certcheck.Checker
+	if !*disableCertCheck {
+		certChecker = certcheck.New(certcheck.Handlers{
+			OnCheck: st.AddCertCheck,
+			OnAlert: func(a model.Alert) {
+				st.AddAlert(a)
+				log.Printf("[ALERT %s] %s — %s", a.Severity, a.Title, a.Detail)
+			},
+		}, filepath.Join(*dataDir, "certcheck_baseline.json"))
+		_ = certChecker.Start(ctx) // always succeeds — see Start's doc comment
 	}
 
 	assets, err := web.Assets()
 	if err != nil {
-		fatalWithBox("加载界面资源失败: %v", err)
+		fatalWithBox(i18n.T("log.load_assets_failed"), err)
 	}
 
 	app := NewApp(st)
 
-	log.Printf("NetWatch CookieGuard 正在启动原生窗口界面…")
-	log.Printf("数据目录: %s", *dataDir)
+	log.Print(i18n.T("log.starting_window"))
+	log.Printf(i18n.T("log.data_dir"), *dataDir)
 	if *debugETW != "" {
-		log.Printf("调试模式:原始 ETW 事件将写入 %s", *debugETW)
+		log.Printf(i18n.T("log.debug_etw_mode"), *debugETW)
 	}
 
 	go func() {
@@ -210,9 +251,12 @@ func main() {
 				}
 			},
 			func() {
-				log.Println("正在停止监控…")
+				log.Println(i18n.T("log.stopping_monitor"))
 				cancel()
 				collector.Stop()
+				if certChecker != nil {
+					certChecker.Stop()
+				}
 				st.Close()
 				if ctx, ok := app.Context(); ok {
 					wailsRuntime.Quit(ctx)
@@ -223,23 +267,30 @@ func main() {
 		)
 	}()
 
-	// Poll the store's unacknowledged critical/high count to drive the
-	// tray icon color; simple and avoids threading another callback
-	// through the whole pipeline for a purely cosmetic signal.
+	// Poll the store's unacknowledged critical/high count to drive the tray
+	// icon color; simple and avoids threading another callback through the
+	// whole pipeline for a purely cosmetic signal. Also re-checks the
+	// active language every tick (not just the alert count) so a language
+	// switch made from the dashboard while an alert is already active still
+	// gets picked up here within one poll interval, not only on the next
+	// state transition.
 	go func() {
 		last := false
+		lastLang := i18n.Current()
 		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
 		for range t.C {
 			count := st.UnacknowledgedCriticalCount()
 			active := count > 0
-			if active != last {
-				tooltip := "NetWatch CookieGuard - 正常监控中"
+			lang := i18n.Current()
+			if active != last || lang != lastLang {
+				tooltip := i18n.T("tray.tooltip_normal")
 				if active {
-					tooltip = fmt.Sprintf("NetWatch CookieGuard - ⚠ %d 条高危/严重告警待处理", count)
+					tooltip = i18n.T("tray.tooltip_alert", count)
 				}
 				tray.SetAlert(active, tooltip)
 				last = active
+				lastLang = lang
 			}
 		}
 	}()
@@ -270,7 +321,7 @@ func main() {
 		},
 	})
 	if err != nil {
-		fatalWithBox("启动窗口失败: %v\n(WebView2 运行时可能缺失,下载: https://developer.microsoft.com/microsoft-edge/webview2/)", err)
+		fatalWithBox(i18n.T("log.window_start_failed"), err)
 	}
 }
 
@@ -304,6 +355,7 @@ var logFileBaseNames = []string{
 	"dns.jsonl",
 	"file_access.jsonl",
 	"alerts.jsonl",
+	"certchecks.jsonl",
 }
 
 // cleanLogFiles removes every log file and rotated backup (base,
@@ -357,6 +409,6 @@ func cleanLogFiles(dataDir string) (freedBytes int64, err error) {
 func fatalWithBox(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	log.Print(msg)
-	showErrorBox("NetWatch CookieGuard - 启动失败", msg)
+	showErrorBox(i18n.T("log.startup_failed_title"), msg)
 	os.Exit(1)
 }

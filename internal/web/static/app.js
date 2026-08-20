@@ -5,8 +5,19 @@
 
   const MAX_ROWS = 400; // DOM rows kept per table/list, for render performance
   const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  const SEV_LABEL = { critical: '严重', high: '高', medium: '中', low: '低', info: '信息' };
   const SEV_ICON_NAME = { critical: 'alert-octagon', high: 'alert-triangle', medium: 'alert-circle', low: 'check-circle', info: 'info' };
+
+  // Severity/file-access-kind display labels come from i18n.js's catalog
+  // (shared with the severity filter <select>'s own options) rather than a
+  // static table here, so they follow the dashboard's active language.
+  function sevLabel(sev) {
+    return i18n.t('sev.' + (sev || 'info'));
+  }
+  function kindLabel(kind) {
+    const key = 'kind.' + kind;
+    const label = i18n.t(key);
+    return label === key ? esc(kind) : label; // unrecognized kind: fall back to the raw (escaped) value rather than a literal "kind.foo"
+  }
 
   // Inline SVG icons, resolved against the <symbol> sprite embedded in
   // index.html — self-hosted, no icon font/CDN, matches the app's
@@ -20,8 +31,9 @@
     conns: [],
     files: [],
     dns: [],
+    certChecks: [],
     procs: new Map(), // pid -> proc
-    seenSeq: { net: new Set(), dns: new Set(), file: new Set(), alert: new Set() },
+    seenSeq: { net: new Set(), dns: new Set(), file: new Set(), alert: new Set(), certcheck: new Set() },
     paused: false,
   };
 
@@ -42,8 +54,9 @@
     if (isNaN(d.getTime())) return '';
     const now = new Date();
     const sameDay = d.toDateString() === now.toDateString();
-    const t = d.toLocaleTimeString('zh-CN', { hour12: false });
-    return sameDay ? t : d.toLocaleDateString('zh-CN') + ' ' + t;
+    const loc = i18n.locale();
+    const t = d.toLocaleTimeString(loc, { hour12: false });
+    return sameDay ? t : d.toLocaleDateString(loc) + ' ' + t;
   }
 
   function truncate(s, n) {
@@ -51,19 +64,19 @@
     return s.length > n ? s.slice(0, n - 1) + '…' : s;
   }
 
-  // Collapsible "证据" block: full path, command line, parent PID, hash —
+  // Collapsible evidence block: full path, command line, parent PID, hash —
   // the forensic detail needed to actually tell a real threat from
   // developer tooling, kept out of the way until you ask for it.
   function renderEvidence(proc) {
     if (!proc) return '';
     const rows = [];
-    if (proc.imagePath) rows.push(['完整路径', esc(proc.imagePath)]);
-    if (proc.commandLine) rows.push(['命令行', esc(proc.commandLine)]);
-    if (proc.ppid) rows.push(['父进程 PID', String(proc.ppid)]);
-    if (proc.sha256) rows.push(['SHA-256', esc(proc.sha256) + ' <a href="https://www.virustotal.com/gui/search/' + esc(proc.sha256) + '" target="_blank" rel="noopener">用 VirusTotal 查这个哈希 ↗</a>']);
-    if (proc.startTime) rows.push(['进程启动时间', fmtTime(proc.startTime)]);
+    if (proc.imagePath) rows.push([i18n.t('ev.image_path'), esc(proc.imagePath)]);
+    if (proc.commandLine) rows.push([i18n.t('ev.command_line'), esc(proc.commandLine)]);
+    if (proc.ppid) rows.push([i18n.t('ev.ppid'), String(proc.ppid)]);
+    if (proc.sha256) rows.push([i18n.t('ev.sha256'), esc(proc.sha256) + ' <a href="https://www.virustotal.com/gui/search/' + esc(proc.sha256) + '" target="_blank" rel="noopener">' + i18n.t('ev.vt_link') + '</a>']);
+    if (proc.startTime) rows.push([i18n.t('ev.start_time'), fmtTime(proc.startTime)]);
     if (!rows.length) return '';
-    return `<details class="evidence"><summary>${icon('search')} 证据详情</summary><table class="evidence-table">${
+    return `<details class="evidence"><summary>${icon('search')} ${i18n.t('ev.summary')}</summary><table class="evidence-table">${
       rows.map(([k, v]) => `<tr><td class="evidence-key">${k}</td><td class="mono wrap">${v}</td></tr>`).join('')
     }</table></details>`;
   }
@@ -78,15 +91,22 @@
   let eventBuffer = [];
   let snapshotLoaded = false;
 
+  // Tracked so a language switch (applyLanguage, below) can redraw whatever
+  // the connection-state text currently says in the new language — setConn
+  // itself only runs on an actual connect/disconnect, which won't
+  // necessarily coincide with the user changing languages.
+  let isConnected = false;
+
   function setConn(connected) {
+    isConnected = connected;
     const dot = document.getElementById('connDot');
     const label = document.getElementById('connLabel');
     if (connected) {
       dot.classList.remove('off');
-      label.textContent = '已连接·实时监控中';
+      label.textContent = i18n.t('conn.connected');
     } else {
       dot.classList.add('off');
-      label.textContent = '正在连接后台服务…';
+      label.textContent = i18n.t('conn.connecting');
     }
   }
 
@@ -114,6 +134,7 @@
       state.conns = snap.nets || [];
       state.files = snap.files || [];
       state.dns = snap.dns || [];
+      state.certChecks = snap.certChecks || [];
       (snap.procs || []).forEach(upsertProc);
       markSeen();
     } catch (e) {
@@ -130,6 +151,7 @@
     state.conns.forEach(c => state.seenSeq.net.add(c.seq));
     state.files.forEach(f => state.seenSeq.file.add(f.seq));
     state.dns.forEach(d => state.seenSeq.dns.add(d.seq));
+    state.certChecks.forEach(c => state.seenSeq.certcheck.add(c.seq));
   }
 
   // This tool is meant to run for weeks at a time, so "cap the array, but
@@ -137,7 +159,7 @@
   // memory leak — every popped array entry's seq has to come out of
   // seenSeq too, or the Set just grows forever even though the array
   // stays a fixed size.
-  const ARRAY_CAPS = { alert: 2000, net: 3000, file: 3000, dns: 3000 };
+  const ARRAY_CAPS = { alert: 2000, net: 3000, file: 3000, dns: 3000, certcheck: 1000 };
 
   function pushDeduped(type, arr, item) {
     const seen = state.seenSeq[type];
@@ -191,6 +213,10 @@
         upsertProc(env.data);
         scheduleRender('procs');
         break;
+      case 'certcheck':
+        if (!pushDeduped('certcheck', state.certChecks, env.data)) return;
+        scheduleRender('certchecks');
+        break;
     }
   }
 
@@ -232,7 +258,7 @@
     pending.clear();
   }
   function renderAll() {
-    ['alerts', 'conns', 'files', 'dns', 'procs'].forEach(renderSection);
+    ['alerts', 'conns', 'files', 'dns', 'procs', 'certchecks'].forEach(renderSection);
   }
 
   function renderSection(section) {
@@ -241,6 +267,7 @@
     if (section === 'files') return renderFiles();
     if (section === 'dns') return renderDns();
     if (section === 'procs') return renderProcs();
+    if (section === 'certchecks') return renderCertChecks();
   }
 
   // ---------- alerts ----------
@@ -282,22 +309,26 @@
       // a.process is the evidence snapshot taken at alert time (authoritative);
       // fall back to the live process table in case an older alert predates it.
       const proc = a.process || state.procs.get(a.pid);
+      // Some alert rules (e.g. certcheck's "tls_interception") aren't about
+      // any one process at all — a.pid is 0/absent by design there, not a
+      // failed identity lookup, so showing an "identity unknown" chip would
+      // misleadingly imply an unidentified suspicious process was involved.
       const identityUnknown = !proc || !proc.name;
-      const procChip = identityUnknown
-        ? `<span class="chip unsigned">${icon('help-circle')} 身份不明 · PID ${a.pid || '-'}</span>`
-        : `<span class="chip">${esc(proc.name)}${proc.nameInherited ? ' (继承自父进程)' : ''} · PID ${a.pid || '-'}</span>`;
+      const procChip = !a.pid ? '' : identityUnknown
+        ? `<span class="chip unsigned">${icon('help-circle')} ${i18n.t('chip.identity_unknown_pid', a.pid)}</span>`
+        : `<span class="chip">${i18n.t('chip.name_pid', esc(proc.name) + (proc.nameInherited ? i18n.t('chip.inherited_suffix') : ''), a.pid)}</span>`;
       const signedChip = proc && proc.sigChecked
-        ? (proc.signed ? `<span class="chip">${icon('check')} 已签名${proc.signerName ? ': ' + esc(truncate(proc.signerName, 20)) : ''}</span>` : `<span class="chip unsigned">${icon('alert-triangle')} 未签名</span>`)
+        ? (proc.signed ? `<span class="chip">${icon('check')} ${proc.signerName ? i18n.t('chip.signed_by', esc(truncate(proc.signerName, 20))) : i18n.t('chip.signed')}</span>` : `<span class="chip unsigned">${icon('alert-triangle')} ${i18n.t('chip.unsigned')}</span>`)
         : '';
-      const knownChip = proc && proc.known ? `<span class="chip known">常见浏览器</span>` : '';
-      const suspChip = proc && proc.suspiciousLoc ? `<span class="chip unsigned">${icon('folder')} 可疑路径</span>` : '';
+      const knownChip = proc && proc.known ? `<span class="chip known">${i18n.t('chip.known_browser')}</span>` : '';
+      const suspChip = proc && proc.suspiciousLoc ? `<span class="chip unsigned">${icon('folder')} ${i18n.t('chip.suspicious_path')}</span>` : '';
       const aiChip = a.aiService ? `<span class="chip known">${icon('bot')} ${esc(a.aiService)}</span>` : '';
       const evidence = renderEvidence(proc);
       return `
         <div class="alert-card sev-${sev} ${a.ack ? 'ack' : ''}" data-seq="${a.seq}">
           <div class="alert-body">
             <div class="alert-top-row">
-              <span class="badge sev-${sev}">${icon(SEV_ICON_NAME[sev] || 'info')}${SEV_LABEL[sev] || sev}</span>
+              <span class="badge sev-${sev}">${icon(SEV_ICON_NAME[sev] || 'info')}${sevLabel(sev)}</span>
               ${procChip}
               ${signedChip}${suspChip}${knownChip}${aiChip}
               <span class="spacer"></span>
@@ -307,7 +338,7 @@
             <div class="alert-detail">${esc(a.detail)}</div>
             ${evidence}
           </div>
-          ${a.ack ? '' : `<button class="ack-btn" data-ack="${a.seq}">${icon('check')} 确认</button>`}
+          ${a.ack ? '' : `<button class="ack-btn" data-ack="${a.seq}">${icon('check')} ${i18n.t('btn.ack')}</button>`}
         </div>`;
     }).join('');
   }
@@ -373,8 +404,6 @@
 
   // ---------- sensitive files ----------
 
-  const KIND_LABEL = { open: '打开/读取', create: '创建', write: '写入', delete: '删除' };
-
   function renderFiles() {
     document.getElementById('statFiles').textContent = state.files.length;
     document.getElementById('tabCountFiles').textContent = state.files.length;
@@ -387,13 +416,13 @@
     list = list.slice(0, MAX_ROWS);
 
     document.getElementById('fileBody').innerHTML = list.map(f => {
-      const ownFlag = f.ownFile ? '<span class="dot-flag dot-ok"></span>本体访问' : `<span class="dot-flag dot-critical"></span>${icon('alert-triangle')} 非本体访问`;
+      const ownFlag = f.ownFile ? `<span class="dot-flag dot-ok"></span>${i18n.t('own.own_access')}` : `<span class="dot-flag dot-critical"></span>${icon('alert-triangle')} ${i18n.t('own.non_own_access')}`;
       return `<tr>
         <td>${fmtTime(f.time)}</td>
         <td>${esc(f.procName || '?')}</td>
         <td class="num">${f.pid}</td>
         <td>${esc(f.app)}</td>
-        <td>${KIND_LABEL[f.kind] || esc(f.kind)}</td>
+        <td>${kindLabel(f.kind)}</td>
         <td>${ownFlag}</td>
         <td class="mono wrap">${esc(f.path)}</td>
       </tr>`;
@@ -438,15 +467,15 @@
       if (!p.imagePath) {
         // No path was ever resolved for this PID, so a signature check was
         // never possible — this is a dead end, not "still working on it".
-        sig = '<span style="color:var(--text-muted)">无法验证(身份不明)</span>';
+        sig = `<span style="color:var(--text-muted)">${i18n.t('proc.cant_verify')}</span>`;
       } else if (p.sigChecked) {
-        sig = p.signed ? `<span class="chip">${icon('check')} ${esc(truncate(p.signerName || '已签名', 22))}</span>` : `<span class="chip unsigned">${icon('alert-triangle')} 未签名</span>`;
+        sig = p.signed ? `<span class="chip">${icon('check')} ${esc(truncate(p.signerName || i18n.t('chip.signed'), 22))}</span>` : `<span class="chip unsigned">${icon('alert-triangle')} ${i18n.t('chip.unsigned')}</span>`;
       } else {
-        sig = '<span style="color:var(--text-muted)">检查中…</span>';
+        sig = `<span style="color:var(--text-muted)">${i18n.t('proc.checking')}</span>`;
       }
-      const status = p.exited ? '<span class="chip">已退出</span>' : '<span class="chip known">运行中</span>';
-      const susp = p.suspiciousLoc ? ` <span class="chip unsigned">${icon('folder')} 可疑路径</span>` : '';
-      const name = p.name ? esc(p.name) + (p.nameInherited ? ' <span style="color:var(--text-muted);font-size:11px">(继承自父进程)</span>' : '') : `<span class="chip unsigned">${icon('help-circle')} 身份不明</span>`;
+      const status = p.exited ? `<span class="chip">${i18n.t('proc.exited')}</span>` : `<span class="chip known">${i18n.t('proc.running')}</span>`;
+      const susp = p.suspiciousLoc ? ` <span class="chip unsigned">${icon('folder')} ${i18n.t('chip.suspicious_path')}</span>` : '';
+      const name = p.name ? esc(p.name) + (p.nameInherited ? ` <span style="color:var(--text-muted);font-size:11px">${i18n.t('chip.inherited_suffix')}</span>` : '') : `<span class="chip unsigned">${icon('help-circle')} ${i18n.t('chip.identity_unknown')}</span>`;
       return `<tr>
         <td>${name}</td>
         <td class="num">${p.pid}</td>
@@ -454,6 +483,54 @@
         <td>${sig}</td>
         <td class="mono wrap">${esc(p.imagePath)}</td>
         <td>${status}${susp}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  // ---------- cert checks ----------
+
+  function renderCertChecks() {
+    document.getElementById('tabCountCertChecks').textContent = state.certChecks.length;
+    const q = document.getElementById('certCheckSearch').value.trim().toLowerCase();
+    let list = state.certChecks;
+    if (q) list = list.filter(c => (c.domain || '').toLowerCase().includes(q));
+    list = list.slice(0, MAX_ROWS);
+
+    const body = document.getElementById('certCheckBody');
+    const empty = document.getElementById('certCheckEmpty');
+    const wrap = body.closest('.table-wrap');
+    if (list.length === 0) {
+      body.innerHTML = '';
+      wrap.style.display = 'none';
+      empty.style.display = '';
+      return;
+    }
+    wrap.style.display = '';
+    empty.style.display = 'none';
+
+    body.innerHTML = list.map(c => {
+      let status;
+      if (!c.ok) {
+        status = `<span class="dot-flag dot-neutral"></span>${i18n.t('cc.probe_failed')}${c.error ? `: ${esc(truncate(c.error, 40))}` : ''}`;
+      } else if (c.suspectedVendor) {
+        status = `<span class="dot-flag dot-critical"></span>${icon('shield-alert')} ${i18n.t('cc.suspected_intercept', esc(c.suspectedVendor))}`;
+      } else if (!c.trustedPublicRoot) {
+        status = `<span class="dot-flag dot-warn"></span>${icon('alert-triangle')} ${i18n.t('cc.not_public_ca')}`;
+      } else if (c.suspectedConsumerAV) {
+        status = `<span class="dot-flag dot-ok"></span>${i18n.t('cc.ok_local_av', esc(c.suspectedConsumerAV))}`;
+      } else if (c.changed) {
+        status = `<span class="dot-flag dot-warn"></span>${icon('alert-triangle')} ${i18n.t('cc.issuance_changed')}`;
+      } else {
+        status = `<span class="dot-flag dot-ok"></span>${icon('check')} ${i18n.t('cc.ok')}`;
+      }
+      const trusted = c.ok ? (c.trustedPublicRoot ? `<span class="chip known">${icon('check')} ${i18n.t('cc.trusted')}</span>` : `<span class="chip unsigned">${icon('alert-triangle')} ${i18n.t('cc.untrusted')}</span>`) : '';
+      return `<tr>
+        <td>${fmtTime(c.time)}</td>
+        <td class="mono">${esc(c.domain)}</td>
+        <td>${esc(c.issuerCN || c.issuerO || '—')}</td>
+        <td class="mono wrap">${esc(c.rootSubject || '—')}</td>
+        <td>${trusted}</td>
+        <td>${status}</td>
       </tr>`;
     }).join('');
   }
@@ -476,6 +553,7 @@
   document.getElementById('fileSearch').addEventListener('input', () => renderSection('files'));
   document.getElementById('dnsSearch').addEventListener('input', () => renderSection('dns'));
   document.getElementById('procSearch').addEventListener('input', () => renderSection('procs'));
+  document.getElementById('certCheckSearch').addEventListener('input', () => renderSection('certchecks'));
 
   document.getElementById('alertList').addEventListener('click', (ev) => {
     const btn = ev.target.closest('[data-ack]');
@@ -490,12 +568,73 @@
       });
   });
 
-  document.getElementById('pauseBtn').addEventListener('click', (ev) => {
+  // Rewrites the pause button's label for the current state.paused/language
+  // combination. Needed both on an actual click and — since the button's
+  // whole innerHTML gets replaced here rather than living inside a
+  // translatePage()-managed <span data-i18n> — on every language switch
+  // too, or a switch while paused would leave stale text behind.
+  function updatePauseBtn() {
+    const btn = document.getElementById('pauseBtn');
+    btn.innerHTML = state.paused ? `${icon('play')} ${i18n.t('btn.resume')}` : `${icon('pause')} ${i18n.t('btn.pause')}`;
+  }
+
+  document.getElementById('pauseBtn').addEventListener('click', () => {
     state.paused = !state.paused;
-    const btn = ev.target.closest('#pauseBtn');
-    btn.innerHTML = state.paused ? `${icon('play')} 恢复刷新` : `${icon('pause')} 暂停刷新`;
+    updatePauseBtn();
     if (!state.paused) renderAll();
   });
+
+  // ---------- language switching ----------
+  //
+  // The dashboard's own DOM chrome (this file + i18n.js) translates itself
+  // instantly and entirely client-side. In the background, the choice is
+  // also persisted to localStorage (so this window reopens in the same
+  // language) and pushed to the Go backend via SetLanguage, which persists
+  // it for the next launch and relabels the tray immediately — see
+  // cmd/netwatch/app.go's SetLanguage doc comment. Alerts/cert-check
+  // findings already on screen keep whatever language they arrived in
+  // (they're plain text from the backend, not re-translatable client-side);
+  // only new ones generated after the switch follow the new language.
+  const LANG_STORAGE_KEY = 'netwatch_lang';
+
+  function applyLanguage(lang) {
+    i18n.setLang(lang);
+    document.getElementById('langSelect').value = i18n.getLang();
+    i18n.translatePage();
+    // Neither of these lives inside a translatePage()-managed <span
+    // data-i18n>: both fully replace their own innerHTML/textContent
+    // dynamically, so a language switch has to explicitly redraw them in
+    // whatever state they're currently in (see each function's own note).
+    setConn(isConnected);
+    updatePauseBtn();
+    renderAll();
+  }
+
+  document.getElementById('langSelect').addEventListener('change', (ev) => {
+    const lang = ev.target.value;
+    localStorage.setItem(LANG_STORAGE_KEY, lang);
+    applyLanguage(lang);
+    if (window.go && window.go.main && window.go.main.App && window.go.main.App.SetLanguage) {
+      window.go.main.App.SetLanguage(lang).catch(() => {});
+    }
+  });
+
+  // Resolves the language to open in: a previously saved choice for this
+  // window, else whatever the backend itself is currently using (a saved
+  // preference from a prior run, or the detected Windows UI language — see
+  // internal/i18n.Init on the Go side), else Chinese.
+  async function initLanguage() {
+    let lang = localStorage.getItem(LANG_STORAGE_KEY);
+    if (!lang) {
+      try {
+        lang = await window.go.main.App.GetLanguage();
+      } catch (e) {
+        lang = null;
+      }
+    }
+    if (!lang || !i18n.SUPPORTED.includes(lang)) lang = 'zh';
+    applyLanguage(lang);
+  }
 
   if (window.Notification && Notification.permission === 'default') {
     // best-effort; ignored if the user dismisses it
@@ -503,5 +642,5 @@
   }
 
   connect();
-  loadSnapshot();
+  initLanguage().finally(loadSnapshot);
 })();

@@ -3,16 +3,33 @@
 // to touch them, and the tunable knobs for the correlation engine.
 package config
 
-import "strings"
+import (
+	"strings"
+
+	"netwatch/internal/i18n"
+)
 
 // SensitiveTarget is one watched file/folder pattern belonging to an app.
 type SensitiveTarget struct {
-	App      string   // display name, e.g. "Chrome Cookies", "Google 账号密码"
+	// AppKey (+ AppArgs) is an internal/i18n catalog key for the target's
+	// display name, e.g. "target.browser_cookies" with AppArgs{"Chrome"} —
+	// resolved lazily via TargetAppName() at the point an alert actually
+	// fires, not baked into a plain string here at startup, so a live
+	// language switch (internal/i18n.Set) is reflected in the very next
+	// alert this target raises rather than only after a restart.
+	AppKey   string
+	AppArgs  []any
 	Category string   // "cookie" | "password" | "token" | "config"
 	Pattern  string   // lower-cased, drive/device-agnostic substring to match against the reported file path
 	BasePath string   // optional second required substring, also lower-cased/drive-agnostic (see below)
 	Critical bool     // true = this is a session/credential store (cookie theft target)
 	Owners   []string // process image names (lower-case, no path) that are expected/normal to touch this file
+}
+
+// TargetAppName resolves a SensitiveTarget's display name in the
+// currently active language.
+func TargetAppName(t SensitiveTarget) string {
+	return i18n.T(t.AppKey, t.AppArgs...)
 }
 
 // SensitiveTargets returns the list of file patterns we watch for via the
@@ -66,24 +83,24 @@ func SensitiveTargets() []SensitiveTarget {
 	// before.
 	for _, b := range chromiumBrowsers {
 		targets = append(targets,
-			SensitiveTarget{App: b.app + " Cookies 数据库", Category: "cookie", Pattern: "network\\cookies", BasePath: b.base, Critical: true, Owners: []string{b.owner}},
-			SensitiveTarget{App: b.app + " 保存的密码", Category: "password", Pattern: "login data", BasePath: b.base, Critical: true, Owners: []string{b.owner}},
-			SensitiveTarget{App: b.app + " Local Storage(可能含网页 token)", Category: "token", Pattern: b.base + `default\local storage`, Critical: false, Owners: []string{b.owner}},
+			SensitiveTarget{AppKey: "target.browser_cookies", AppArgs: []any{b.app}, Category: "cookie", Pattern: "network\\cookies", BasePath: b.base, Critical: true, Owners: []string{b.owner}},
+			SensitiveTarget{AppKey: "target.browser_password", AppArgs: []any{b.app}, Category: "password", Pattern: "login data", BasePath: b.base, Critical: true, Owners: []string{b.owner}},
+			SensitiveTarget{AppKey: "target.browser_local_storage", AppArgs: []any{b.app}, Category: "token", Pattern: b.base + `default\local storage`, Critical: false, Owners: []string{b.owner}},
 		)
 	}
 
 	// Firefox
 	targets = append(targets,
-		SensitiveTarget{App: "Firefox Cookies", Category: "cookie", Pattern: "cookies.sqlite", Critical: true, Owners: []string{"firefox.exe"}},
-		SensitiveTarget{App: "Firefox 保存的密码", Category: "password", Pattern: "logins.json", Critical: true, Owners: []string{"firefox.exe"}},
-		SensitiveTarget{App: "Firefox 密码主密钥", Category: "password", Pattern: "key4.db", Critical: true, Owners: []string{"firefox.exe"}},
+		SensitiveTarget{AppKey: "target.firefox_cookies", Category: "cookie", Pattern: "cookies.sqlite", Critical: true, Owners: []string{"firefox.exe"}},
+		SensitiveTarget{AppKey: "target.firefox_password", Category: "password", Pattern: "logins.json", Critical: true, Owners: []string{"firefox.exe"}},
+		SensitiveTarget{AppKey: "target.firefox_master_key", Category: "password", Pattern: "key4.db", Critical: true, Owners: []string{"firefox.exe"}},
 	)
 
 	// Discord family (and clones) - Electron apps keep the session token in
 	// their leveldb-backed Local Storage.
 	for _, d := range []string{"discord", "discordcanary", "discordptb", "discorddevelopment", "lightcord"} {
 		targets = append(targets, SensitiveTarget{
-			App: "Discord(" + d + ")", Category: "token",
+			AppKey: "target.discord_variant", AppArgs: []any{d}, Category: "token",
 			Pattern:  `\appdata\roaming\` + d + `\local storage\leveldb`,
 			Critical: true,
 			Owners:   []string{d + ".exe", "update.exe"},
@@ -94,15 +111,15 @@ func SensitiveTargets() []SensitiveTarget {
 	// install Steam on any drive/path) and matches on the well-known
 	// relative file names instead.
 	targets = append(targets,
-		SensitiveTarget{App: "Steam 登录信息", Category: "token", Pattern: `steam\config\loginusers.vdf`, Critical: true, Owners: []string{"steam.exe"}},
-		SensitiveTarget{App: "Steam 免二次验证凭据(ssfn)", Category: "token", Pattern: `steam\ssfn`, Critical: true, Owners: []string{"steam.exe"}},
+		SensitiveTarget{AppKey: "target.steam_login", Category: "token", Pattern: `steam\config\loginusers.vdf`, Critical: true, Owners: []string{"steam.exe"}},
+		SensitiveTarget{AppKey: "target.steam_ssfn", Category: "token", Pattern: `steam\ssfn`, Critical: true, Owners: []string{"steam.exe"}},
 	)
 
 	// EA app / Origin - exact file names are not well documented publicly,
 	// so we watch the whole config/cache directory as a coarser net.
 	targets = append(targets,
-		SensitiveTarget{App: "EA App", Category: "token", Pattern: `\electronic arts\ea desktop`, Critical: false, Owners: []string{"eadesktop.exe", "eabackgroundservice.exe"}},
-		SensitiveTarget{App: "Origin", Category: "token", Pattern: `\appdata\roaming\origin`, Critical: false, Owners: []string{"origin.exe", "originwebhelperservice.exe"}},
+		SensitiveTarget{AppKey: "target.ea_app", Category: "token", Pattern: `\electronic arts\ea desktop`, Critical: false, Owners: []string{"eadesktop.exe", "eabackgroundservice.exe"}},
+		SensitiveTarget{AppKey: "target.origin", Category: "token", Pattern: `\appdata\roaming\origin`, Critical: false, Owners: []string{"origin.exe", "originwebhelperservice.exe"}},
 	)
 
 	// Generic Electron apps (Slack, Teams, WhatsApp, etc.) - same leveldb
@@ -113,7 +130,7 @@ func SensitiveTargets() []SensitiveTarget {
 		{"WhatsApp", "whatsapp", "whatsapp.exe"},
 	} {
 		targets = append(targets, SensitiveTarget{
-			App: e.app + " Local Storage", Category: "token",
+			AppKey: "target.electron_local_storage", AppArgs: []any{e.app}, Category: "token",
 			Pattern:  `\appdata\roaming\` + e.dir + `\local storage\leveldb`,
 			Critical: false,
 			Owners:   []string{e.owner},
@@ -121,6 +138,23 @@ func SensitiveTargets() []SensitiveTarget {
 	}
 
 	return targets
+}
+
+// CategoryLabel returns the currently active language's display name for a
+// SensitiveTarget.Category value ("cookie" | "password" | "token" |
+// "config"), used by internal/correlate to name what kind of store a
+// non-owner process touched.
+func CategoryLabel(category string) string {
+	switch category {
+	case "cookie":
+		return i18n.T("category.cookie")
+	case "password":
+		return i18n.T("category.password")
+	case "token":
+		return i18n.T("category.token")
+	default:
+		return i18n.T("category.config")
+	}
 }
 
 // KnownBrowsers lists process image names that are expected to legitimately
@@ -184,6 +218,90 @@ func MatchAIService(domain string) string {
 		}
 	}
 	return ""
+}
+
+// CertCheckTargets is the small set of domains internal/certcheck
+// periodically probes for TLS interception (a MITM proxy re-signing certs
+// with a root the OS was made to trust silently) — the one blind spot nothing
+// else in this tool can see, since a network-level interception produces no
+// suspicious file/process/network behavior at all. The first three are the
+// AI-service domains this whole project prioritizes protecting the session
+// cookies of (see WatchedAIServiceDomains); github.com/cloudflare.com are
+// generic, high-uptime anchors kept as a baseline independent of any one
+// AI vendor's own CDN/cert rotation quirks.
+func CertCheckTargets() []string {
+	return []string{
+		"claude.ai",
+		"chatgpt.com",
+		"gemini.google.com",
+		"github.com",
+		"cloudflare.com",
+	}
+}
+
+// CertCheckIntervalSeconds is how often each target in CertCheckTargets is
+// re-probed. Frequent enough to notice a MITM proxy toggled on mid-session
+// within one work session; infrequent enough that the tool's one piece of
+// self-initiated network traffic stays unobtrusive.
+const CertCheckIntervalSeconds = 600
+
+// KnownInterceptionVendors maps a lower-cased substring of a certificate's
+// Issuer CommonName/Organization to a display label for enterprise
+// SSL-inspection products. A match here is the highest-confidence signal
+// certcheck can raise: these products exist specifically to decrypt and
+// re-encrypt HTTPS traffic on corporate/school networks, so seeing one
+// mid-chain on an otherwise-ordinary domain is a direct, nameable finding
+// rather than an inference.
+func KnownInterceptionVendors() map[string]string {
+	return map[string]string{
+		"zscaler":                      "Zscaler",
+		"netskope":                     "Netskope",
+		"palo alto":                    "Palo Alto Networks",
+		"paloalto":                     "Palo Alto Networks",
+		"fortinet":                     "Fortinet FortiGate",
+		"fortigate":                    "Fortinet FortiGate",
+		"cisco umbrella":               "Cisco Umbrella",
+		"ironport":                     "Cisco IronPort",
+		"blue coat":                    "Blue Coat / Symantec ProxySG",
+		"bluecoat":                     "Blue Coat / Symantec ProxySG",
+		"forcepoint":                   "Forcepoint",
+		"websense":                     "Forcepoint (Websense)",
+		"skyhigh":                      "Skyhigh Security",
+		"mcafee web gateway":           "McAfee Web Gateway",
+		"check point":                  "Check Point",
+		"checkpoint":                   "Check Point",
+		"sophos":                       "Sophos",
+		"barracuda":                    "Barracuda",
+		"menlo security":               "Menlo Security",
+		"iboss":                        "iboss",
+		"sonicwall":                    "SonicWall",
+		"trustwave secure web gateway": "Trustwave",
+		"squid":                        i18n.T("vendor.squid"),
+		"mitmproxy":                    "mitmproxy",
+		"charles proxy":                "Charles Proxy",
+		"fiddler":                      "Fiddler",
+	}
+}
+
+// KnownConsumerAVRoots maps a lower-cased Issuer substring for common
+// consumer-antivirus local HTTPS-scanning root certificates, kept separate
+// from KnownInterceptionVendors: these also intercept your TLS traffic, but
+// for local anti-malware content scanning on a machine you presumably
+// control yourself — not third-party network surveillance. A match here
+// should read as "expected, low concern", not "someone is watching you".
+func KnownConsumerAVRoots() map[string]string {
+	return map[string]string{
+		"kaspersky":       "Kaspersky",
+		"avast":           "Avast",
+		"avg":             "AVG",
+		"eset":            "ESET",
+		"bitdefender":     "Bitdefender",
+		"norton":          "Norton/NortonLifeLock",
+		"mcafee livesafe": "McAfee LiveSafe",
+		"malwarebytes":    "Malwarebytes",
+		"360":             i18n.T("vendor.qihoo360"),
+		"qihoo":           "360 (Qihoo)",
+	}
 }
 
 // CorrelationWindowSeconds is how long after a sensitive-file touch we keep

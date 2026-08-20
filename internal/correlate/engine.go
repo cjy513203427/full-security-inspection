@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"netwatch/internal/config"
+	"netwatch/internal/i18n"
 	"netwatch/internal/model"
 	"netwatch/internal/procinfo"
 )
@@ -67,10 +68,9 @@ type Engine struct {
 	connHistory  map[beaconKey][]connSample
 	sweepCounter uint64 // opportunistic-sweep cadence, see maybeSweepLocked
 
-	fileSeq  uint64
-	netSeq   uint64
-	dnsSeq   uint64
-	alertSeq uint64
+	fileSeq uint64
+	netSeq  uint64
+	dnsSeq  uint64
 }
 
 type Handlers struct {
@@ -112,6 +112,7 @@ func (e *Engine) HandleFile(rawPath string, pid uint32, kind model.FileAccessKin
 	// as "we don't know", never silently coerced into "so it must be fine".
 	own := !proc.IdentityUnknown() && isOwner(proc.Name, target.Owners)
 	now := time.Now()
+	appName := config.TargetAppName(target)
 
 	fe := model.SensitiveFileEvent{
 		Seq:      e.nextSeq(&e.fileSeq),
@@ -119,7 +120,7 @@ func (e *Engine) HandleFile(rawPath string, pid uint32, kind model.FileAccessKin
 		PID:      pid,
 		ProcName: proc.Name,
 		Path:     rawPath,
-		App:      target.App,
+		App:      appName,
 		Kind:     kind,
 		OwnFile:  own,
 	}
@@ -145,7 +146,7 @@ func (e *Engine) HandleFile(rawPath string, pid uint32, kind model.FileAccessKin
 func (e *Engine) raiseFileAlert(proc model.ProcessInfo, fe model.SensitiveFileEvent, target config.SensitiveTarget) {
 	var score int
 	var reasons []string
-	title := fmt.Sprintf("可疑进程读取了 %s", target.App)
+	title := i18n.T("alert.file.title", fe.App)
 
 	if proc.IdentityUnknown() {
 		// We could not attach any name to this PID at all (tried direct
@@ -154,28 +155,31 @@ func (e *Engine) raiseFileAlert(proc model.ProcessInfo, fe model.SensitiveFileEv
 		// "confirmed a stranger did this" — score and word it accordingly
 		// rather than asserting certainty we don't have.
 		score = 30
-		title = fmt.Sprintf("身份不明的进程读取了 %s", target.App)
-		reasons = append(reasons, "未能确认该进程的名称/路径(已尝试直接查询、进程快照枚举、父进程继承三种方式均失败,可能是权限受限的沙箱子进程)")
+		title = i18n.T("alert.file.title_unknown", fe.App)
+		reasons = append(reasons, i18n.T("reason.identity_unknown_full"))
 	} else {
 		score = 40
-		reasons = append(reasons, fmt.Sprintf("进程不是 %s 本身,却访问了它的%s存储文件", target.App, categoryLabel(target.Category)))
+		reasons = append(reasons, i18n.T("reason.non_owner_access", fe.App, config.CategoryLabel(target.Category)))
 		if proc.SigChecked && !proc.Signed {
 			score += 20
-			reasons = append(reasons, "该程序没有有效的数字签名")
+			reasons = append(reasons, i18n.T("reason.unsigned"))
 		}
 		if proc.SuspiciousLoc {
 			score += 20
-			reasons = append(reasons, "运行路径位于 Temp/AppData/Downloads 等常见恶意软件藏身目录")
+			reasons = append(reasons, i18n.T("reason.suspicious_path_long"))
 		}
 	}
 
 	a := model.Alert{
-		Seq:       e.nextSeq(&e.alertSeq),
+		// Seq is intentionally left unset here: Store.AddAlert assigns it
+		// from a single counter shared across every alert producer (see its
+		// doc comment) — correlate.Engine is no longer the only one now
+		// that internal/certcheck also raises alerts.
 		Time:      fe.Time,
 		Severity:  scoreToSeverity(score),
 		Rule:      "sensitive_file_access",
 		Title:     title,
-		Detail:    strings.Join(reasons, "; ") + fmt.Sprintf("。文件路径: %s", fe.Path),
+		Detail:    strings.Join(reasons, "; ") + i18n.T("alert.file.detail_suffix", fe.Path),
 		PID:       fe.PID,
 		ProcName:  fe.ProcName,
 		ImagePath: proc.ImagePath,
@@ -244,25 +248,26 @@ func (e *Engine) raiseExfilAlert(proc model.ProcessInfo, ne model.NetEvent, touc
 	var apps []string
 	seen := map[string]bool{}
 	for _, t := range touches {
-		if !seen[t.target.App] {
-			apps = append(apps, t.target.App)
-			seen[t.target.App] = true
+		appName := config.TargetAppName(t.target)
+		if !seen[appName] {
+			apps = append(apps, appName)
+			seen[appName] = true
 		}
 	}
 	var extra []string
 	if proc.IdentityUnknown() {
-		extra = append(extra, "未能确认该进程的名称/路径,建议在「进程」标签页用 PID 交叉核对")
+		extra = append(extra, i18n.T("reason.identity_unknown_check_pid"))
 	} else if proc.SigChecked && !proc.Signed {
 		score += 15
-		extra = append(extra, "程序未签名")
+		extra = append(extra, i18n.T("reason.unsigned_short"))
 	}
 	if proc.SuspiciousLoc {
 		score += 10
-		extra = append(extra, "运行路径可疑")
+		extra = append(extra, i18n.T("reason.suspicious_path_short"))
 	}
 	if !hasDNS {
 		score += 10
-		extra = append(extra, "本机未观察到该地址的域名解析过程,可能是硬编码的服务器地址")
+		extra = append(extra, i18n.T("reason.no_dns_seen"))
 	}
 
 	dest := ne.RemoteAddr
@@ -270,20 +275,18 @@ func (e *Engine) raiseExfilAlert(proc model.ProcessInfo, ne model.NetEvent, touc
 		dest = fmt.Sprintf("%s (%s)", ne.Domain, ne.RemoteAddr)
 	}
 
-	title := "🚨 疑似窃密回传:读取登录凭据后立即联网"
+	title := i18n.T("alert.exfil.title")
 	if ne.AIService != "" {
 		score += 15
-		title = fmt.Sprintf("🤖 疑似 %s 会话被窃取:读取凭据后立即联网", ne.AIService)
+		title = i18n.T("alert.exfil.title_ai", ne.AIService)
 	}
 
-	detail := fmt.Sprintf("进程在 %d 秒内读取了: %s;随后连接了 %s:%d。",
-		config.CorrelationWindowSeconds, strings.Join(apps, "、"), dest, ne.RemotePort)
+	detail := i18n.T("alert.exfil.detail", config.CorrelationWindowSeconds, strings.Join(apps, i18n.T("common.list_sep")), dest, ne.RemotePort)
 	if len(extra) > 0 {
-		detail += strings.Join(extra, "; ")
+		detail += " " + strings.Join(extra, "; ")
 	}
 
 	a := model.Alert{
-		Seq:       e.nextSeq(&e.alertSeq),
 		Time:      ne.Time,
 		Severity:  scoreToSeverity(score),
 		Rule:      "file_then_network_exfil",
@@ -307,18 +310,17 @@ func (e *Engine) raiseSuspiciousNetAlert(proc model.ProcessInfo, ne model.NetEve
 		dest = fmt.Sprintf("%s (%s)", ne.Domain, ne.RemoteAddr)
 	}
 	score := 30
-	title := "可疑位置的未签名程序发起联网"
-	detail := fmt.Sprintf("未签名、运行于可疑路径的未知程序主动连接了 %s:%d", dest, ne.RemotePort)
+	title := i18n.T("alert.suspnet.title")
+	detail := i18n.T("alert.suspnet.detail", dest, ne.RemotePort)
 	if !hasDNS {
-		detail += ";且本机未观察到对应的域名解析(可能是硬编码地址)"
+		detail += "; " + i18n.T("reason.no_dns_seen")
 	}
 	if ne.AIService != "" {
 		score += 25
-		title = fmt.Sprintf("🤖 可疑程序正在联网到 %s", ne.AIService)
-		detail += fmt.Sprintf("。目标属于你重点关注的 AI 服务(%s),即使没有先观察到读取凭据文件的动作,也建议优先核实这个进程。", ne.AIService)
+		title = i18n.T("alert.suspnet.title_ai", ne.AIService)
+		detail += i18n.T("alert.suspnet.detail_ai", ne.AIService)
 	}
 	a := model.Alert{
-		Seq:       e.nextSeq(&e.alertSeq),
 		Time:      ne.Time,
 		Severity:  scoreToSeverity(score),
 		Rule:      "suspicious_process_network",
@@ -386,18 +388,17 @@ func (e *Engine) trackBeacon(ne model.NetEvent, proc model.ProcessInfo) {
 		dest = ne.Domain
 	}
 	score := 30
-	title := "检测到规律性心跳联网(可能是恶意软件回连)"
+	title := i18n.T("alert.beacon.title")
 	if ne.AIService != "" {
 		score += 25
-		title = fmt.Sprintf("🤖 检测到规律性心跳联网到 %s", ne.AIService)
+		title = i18n.T("alert.beacon.title_ai", ne.AIService)
 	}
 	a := model.Alert{
-		Seq:      e.nextSeq(&e.alertSeq),
 		Time:     ne.Time,
 		Severity: scoreToSeverity(score),
 		Rule:     "beaconing",
 		Title:    title,
-		Detail: fmt.Sprintf("%s (PID %d) 在过去 %d 秒内以约 %.0f 秒的间隔反复连接 %s,间隔非常规律(抖动 < %.0f%%),不像正常用户交互产生的流量。",
+		Detail: i18n.T("alert.beacon.detail",
 			ne.ProcName, ne.PID, config.BeaconWindowSeconds, mean, dest, config.BeaconJitterFraction*100),
 		PID:       ne.PID,
 		ProcName:  ne.ProcName,
@@ -535,19 +536,6 @@ func scoreToSeverity(score int) model.Severity {
 		return model.SevMedium
 	default:
 		return model.SevLow
-	}
-}
-
-func categoryLabel(cat string) string {
-	switch cat {
-	case "cookie":
-		return "Cookie"
-	case "password":
-		return "密码"
-	case "token":
-		return "登录令牌"
-	default:
-		return "配置"
 	}
 }
 

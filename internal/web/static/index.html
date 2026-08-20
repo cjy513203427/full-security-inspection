@@ -25,78 +25,85 @@
   <symbol id="icon-folder" viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
   <symbol id="icon-check" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></symbol>
   <symbol id="icon-help-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 2-3 4"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
+  <symbol id="icon-shield-alert" viewBox="0 0 24 24"><path d="M12 2 3 6v6c0 5 3.8 9.3 9 10 5.2-.7 9-5 9-10V6z"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16.5" x2="12.01" y2="16.5"/></symbol>
 </svg>
 <header class="app-header">
   <h1><svg class="icon icon-lg"><use href="#icon-shield"/></svg> NetWatch CookieGuard</h1>
-  <span class="subtitle">本机进程级网络 / 敏感文件监控</span>
+  <span class="subtitle" data-i18n="header.subtitle">本机进程级网络 / 敏感文件监控</span>
   <div class="spacer"></div>
   <span class="status-pill"><span class="conn-dot" id="connDot"></span><span id="connLabel">连接中…</span></span>
-  <button class="btn" id="pauseBtn" title="暂停后新事件仍会记录,只是不刷新界面"><svg class="icon"><use href="#icon-pause"/></svg> 暂停刷新</button>
+  <select class="select-input" id="langSelect" data-i18n-title="lang.switch_title" title="切换界面语言">
+    <option value="zh">中文</option>
+    <option value="en">English</option>
+    <option value="de">Deutsch</option>
+  </select>
+  <button class="btn" id="pauseBtn" data-i18n-title="btn.pause_title" title="暂停后新事件仍会记录,只是不刷新界面"><svg class="icon"><use href="#icon-pause"/></svg> <span data-i18n="btn.pause">暂停刷新</span></button>
 </header>
 <main>
   <section class="stat-row">
     <div class="stat-tile critical">
-      <div class="label"><svg class="icon"><use href="#icon-alert-octagon"/></svg> 严重告警</div>
+      <div class="label"><svg class="icon"><use href="#icon-alert-octagon"/></svg> <span data-i18n="stat.critical">严重告警</span></div>
       <div class="value" id="statCritical">0</div>
       <svg class="spark" id="sparkCritical" viewBox="0 0 100 22" preserveAspectRatio="none"></svg>
     </div>
     <div class="stat-tile">
-      <div class="label"><svg class="icon"><use href="#icon-alert-triangle"/></svg> 高危告警</div>
+      <div class="label"><svg class="icon"><use href="#icon-alert-triangle"/></svg> <span data-i18n="stat.high">高危告警</span></div>
       <div class="value" id="statHigh">0</div>
       <svg class="spark" id="sparkHigh" viewBox="0 0 100 22" preserveAspectRatio="none"></svg>
     </div>
     <div class="stat-tile">
-      <div class="label"><svg class="icon"><use href="#icon-globe"/></svg> 网络连接</div>
+      <div class="label"><svg class="icon"><use href="#icon-globe"/></svg> <span data-i18n="stat.conns">网络连接</span></div>
       <div class="value" id="statConns">0</div>
     </div>
     <div class="stat-tile">
-      <div class="label"><svg class="icon"><use href="#icon-lock"/></svg> 敏感文件访问</div>
+      <div class="label"><svg class="icon"><use href="#icon-lock"/></svg> <span data-i18n="stat.files">敏感文件访问</span></div>
       <div class="value" id="statFiles">0</div>
     </div>
     <div class="stat-tile">
-      <div class="label"><svg class="icon"><use href="#icon-cpu"/></svg> 已观察进程数</div>
+      <div class="label"><svg class="icon"><use href="#icon-cpu"/></svg> <span data-i18n="stat.procs">已观察进程数</span></div>
       <div class="value" id="statProcs">0</div>
     </div>
   </section>
 
   <nav class="tabs">
-    <button class="tab active" data-tab="alerts">告警 <span class="count" id="tabCountAlerts">0</span></button>
-    <button class="tab" data-tab="conns">网络连接 <span class="count" id="tabCountConns">0</span></button>
-    <button class="tab" data-tab="files">敏感文件访问 <span class="count" id="tabCountFiles">0</span></button>
-    <button class="tab" data-tab="dns">DNS 解析 <span class="count" id="tabCountDns">0</span></button>
-    <button class="tab" data-tab="procs">进程 <span class="count" id="tabCountProcs">0</span></button>
+    <button class="tab active" data-tab="alerts"><span data-i18n="tab.alerts">告警</span> <span class="count" id="tabCountAlerts">0</span></button>
+    <button class="tab" data-tab="conns"><span data-i18n="tab.conns">网络连接</span> <span class="count" id="tabCountConns">0</span></button>
+    <button class="tab" data-tab="files"><span data-i18n="tab.files">敏感文件访问</span> <span class="count" id="tabCountFiles">0</span></button>
+    <button class="tab" data-tab="dns"><span data-i18n="tab.dns">DNS 解析</span> <span class="count" id="tabCountDns">0</span></button>
+    <button class="tab" data-tab="procs"><span data-i18n="tab.procs">进程</span> <span class="count" id="tabCountProcs">0</span></button>
+    <button class="tab" data-tab="certchecks"><span data-i18n="tab.certchecks">证书检测</span> <span class="count" id="tabCountCertChecks">0</span></button>
   </nav>
 
   <section class="panel active" id="panel-alerts">
     <div class="toolbar">
-      <input class="search-input" id="alertSearch" placeholder="按进程名 / 内容搜索…">
+      <input class="search-input" id="alertSearch" data-i18n-placeholder="filter.alert_search_ph" placeholder="按进程名 / 内容搜索…">
       <select class="select-input" id="alertSevFilter">
-        <option value="">全部级别</option>
-        <option value="critical">严重</option>
-        <option value="high">高</option>
-        <option value="medium">中</option>
-        <option value="low">低</option>
-        <option value="info">信息</option>
+        <option value="" data-i18n="sev.all">全部级别</option>
+        <option value="critical" data-i18n="sev.critical">严重</option>
+        <option value="high" data-i18n="sev.high">高</option>
+        <option value="medium" data-i18n="sev.medium">中</option>
+        <option value="low" data-i18n="sev.low">低</option>
+        <option value="info" data-i18n="sev.info">信息</option>
       </select>
-      <label class="chip" style="cursor:pointer"><input type="checkbox" id="hideAck" style="margin-right:4px;vertical-align:-1px">隐藏已确认</label>
+      <label class="chip" style="cursor:pointer"><input type="checkbox" id="hideAck" style="margin-right:4px;vertical-align:-1px"><span data-i18n="filter.hide_ack">隐藏已确认</span></label>
     </div>
     <div class="alert-list" id="alertList"></div>
     <div class="empty-state" id="alertEmpty" style="display:none">
       <div class="big"><svg class="icon icon-xl"><use href="#icon-shield-check"/></svg></div>
-      <div>暂无告警 · 目前没有检测到可疑行为,监控仍在后台持续进行。</div>
+      <div data-i18n="empty.alerts">暂无告警 · 目前没有检测到可疑行为,监控仍在后台持续进行。</div>
     </div>
   </section>
 
   <section class="panel" id="panel-conns">
     <div class="toolbar">
-      <input class="search-input" id="connSearch" placeholder="按进程名 / IP / 域名搜索…">
-      <label class="chip" style="cursor:pointer"><input type="checkbox" id="aiOnlyFilter" style="margin-right:4px;vertical-align:-1px"><svg class="icon"><use href="#icon-bot"/></svg> 只看 Claude/ChatGPT/Gemini 相关流量</label>
+      <input class="search-input" id="connSearch" data-i18n-placeholder="filter.conn_search_ph" placeholder="按进程名 / IP / 域名搜索…">
+      <label class="chip" style="cursor:pointer"><input type="checkbox" id="aiOnlyFilter" style="margin-right:4px;vertical-align:-1px"><svg class="icon"><use href="#icon-bot"/></svg> <span data-i18n="filter.ai_only">只看 Claude/ChatGPT/Gemini 相关流量</span></label>
     </div>
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>时间</th><th>进程</th><th class="num">PID</th><th>方向</th><th>协议</th>
-          <th>目标地址</th><th class="num">端口</th><th>关联域名</th><th>AI 服务</th>
+          <th data-i18n="col.time">时间</th><th data-i18n="col.process">进程</th><th class="num" data-i18n="col.pid">PID</th><th data-i18n="col.direction">方向</th><th data-i18n="col.proto">协议</th>
+          <th data-i18n="col.remote_addr">目标地址</th><th class="num" data-i18n="col.port">端口</th><th data-i18n="col.domain">关联域名</th><th data-i18n="col.ai_service">AI 服务</th>
         </tr></thead>
         <tbody id="connBody"></tbody>
       </table>
@@ -105,12 +112,12 @@
 
   <section class="panel" id="panel-files">
     <div class="toolbar">
-      <input class="search-input" id="fileSearch" placeholder="按进程名 / 应用 / 路径搜索…">
+      <input class="search-input" id="fileSearch" data-i18n-placeholder="filter.file_search_ph" placeholder="按进程名 / 应用 / 路径搜索…">
     </div>
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>时间</th><th>进程</th><th class="num">PID</th><th>目标应用</th><th>操作</th><th>是否本体访问</th><th>路径</th>
+          <th data-i18n="col.time">时间</th><th data-i18n="col.process">进程</th><th class="num" data-i18n="col.pid">PID</th><th data-i18n="col.target_app">目标应用</th><th data-i18n="col.action">操作</th><th data-i18n="col.own_access">是否本体访问</th><th data-i18n="col.path">路径</th>
         </tr></thead>
         <tbody id="fileBody"></tbody>
       </table>
@@ -119,11 +126,11 @@
 
   <section class="panel" id="panel-dns">
     <div class="toolbar">
-      <input class="search-input" id="dnsSearch" placeholder="按进程名 / 域名搜索…">
+      <input class="search-input" id="dnsSearch" data-i18n-placeholder="filter.dns_search_ph" placeholder="按进程名 / 域名搜索…">
     </div>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>时间</th><th>进程</th><th class="num">PID</th><th>查询域名</th><th>解析结果</th></tr></thead>
+        <thead><tr><th data-i18n="col.time">时间</th><th data-i18n="col.process">进程</th><th class="num" data-i18n="col.pid">PID</th><th data-i18n="col.query">查询域名</th><th data-i18n="col.results">解析结果</th></tr></thead>
         <tbody id="dnsBody"></tbody>
       </table>
     </div>
@@ -131,22 +138,41 @@
 
   <section class="panel" id="panel-procs">
     <div class="toolbar">
-      <input class="search-input" id="procSearch" placeholder="按进程名 / 路径搜索…">
+      <input class="search-input" id="procSearch" data-i18n-placeholder="filter.proc_search_ph" placeholder="按进程名 / 路径搜索…">
     </div>
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>进程</th><th class="num">PID</th><th class="num">PPID</th><th>签名</th><th>路径</th><th>状态</th>
+          <th data-i18n="col.process">进程</th><th class="num" data-i18n="col.pid">PID</th><th class="num" data-i18n="col.ppid">PPID</th><th data-i18n="col.signature">签名</th><th data-i18n="col.path">路径</th><th data-i18n="col.status">状态</th>
         </tr></thead>
         <tbody id="procBody"></tbody>
       </table>
     </div>
   </section>
 
-  <footer class="note">
-    数据全部只保存在本机 data 目录下的 .jsonl 日志文件中,不会上传到任何服务器,本页面也不加载任何外部资源。深度模式基于 Windows ETW 内核事件采集,已自动排除本工具自身产生的网络与文件活动。检测逻辑是启发式规则,请把告警当作「值得去查」的线索,而不是 100% 确定的结论。
+  <section class="panel" id="panel-certchecks">
+    <div class="toolbar">
+      <input class="search-input" id="certCheckSearch" data-i18n-placeholder="filter.certcheck_search_ph" placeholder="按域名搜索…">
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th data-i18n="col.time">时间</th><th data-i18n="col.domain">域名</th><th data-i18n="col.issuer">证书颁发者</th><th data-i18n="col.root_cert">根证书</th><th data-i18n="col.public_ca_trusted">公共 CA 可信</th><th data-i18n="col.status">状态</th>
+        </tr></thead>
+        <tbody id="certCheckBody"></tbody>
+      </table>
+    </div>
+    <div class="empty-state" id="certCheckEmpty" style="display:none">
+      <div class="big"><svg class="icon icon-xl"><use href="#icon-lock"/></svg></div>
+      <div data-i18n="empty.certchecks">暂无证书检测记录,首次探测通常在启动后几秒内完成。</div>
+    </div>
+  </section>
+
+  <footer class="note" data-i18n="footer.note">
+    数据全部只保存在本机 data 目录下的 .jsonl 日志文件中,不会上传到任何服务器,本页面也不加载任何外部资源。深度模式基于 Windows ETW 内核事件采集,已自动排除本工具自身产生的网络与文件活动。证书检测会周期性主动连接几个域名以校验 HTTPS 证书链(用于发现 TLS 拦截),是本工具唯一主动发起的网络连接,可用 -disable-cert-check 参数关闭。检测逻辑是启发式规则,请把告警当作「值得去查」的线索,而不是 100% 确定的结论。
   </footer>
 </main>
+<script src="/i18n.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -10,7 +10,7 @@ func TestAssetsContainDashboard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assets: %v", err)
 	}
-	for _, name := range []string{"index.html", "app.js", "style.css"} {
+	for _, name := range []string{"index.html", "app.js", "i18n.js", "style.css"} {
 		f, err := fsys.Open(name)
 		if err != nil {
 			t.Fatalf("expected %s to be embedded, got error: %v", name, err)
