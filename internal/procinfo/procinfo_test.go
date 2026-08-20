@@ -58,6 +58,41 @@ func TestObserve_AsyncEnrichmentReachesOnUpdate(t *testing.T) {
 	}
 }
 
+// This is the production race behind the "身份不明" alert that resolves to
+// a perfectly identifiable, signed process one event later (e.g.
+// msedgewebview2.exe) instead of one that genuinely disappeared: Observe()
+// plants a Name=="" placeholder (ETW start record missing ImageName, no
+// parent identity yet) and queues async enrichment, but HandleFile/HandleNet
+// call Lookup — not enrich — the moment a sensitive-file touch or connect
+// happens, which can easily land before the background worker gets to it.
+// Lookup must not just hand back that empty placeholder forever; it should
+// retry the same cheap OS query enrich would eventually do anyway.
+func TestLookup_ResolvesPlaceholderSynchronouslyWithoutWaitingForAsyncWorker(t *testing.T) {
+	c := New(nil)
+	selfPID := uint32(os.Getpid())
+
+	// Simulate the ETW process-start record arriving with no name and no
+	// resolvable parent — Observe() has no choice but to cache a
+	// placeholder and queue async enrichment (which we deliberately never
+	// drive here, unlike the test above, to prove Lookup doesn't depend on it).
+	c.Observe(model.ProcessInfo{PID: selfPID, PPID: 0, Name: "", StartTime: time.Now()})
+
+	got := c.Lookup(selfPID)
+	if got.Name == "" {
+		t.Fatalf("expected Lookup to resolve the placeholder synchronously instead of returning it empty, got PID %d with no Name", selfPID)
+	}
+	if got.ImagePath == "" {
+		t.Fatalf("expected ImagePath to be resolved alongside Name, got empty ImagePath")
+	}
+
+	// A second Lookup for the same (already-resolved) PID should just
+	// return the cached identity, not pay for another OS query.
+	got2 := c.Lookup(selfPID)
+	if got2.Name != got.Name {
+		t.Fatalf("expected stable identity across repeated Lookups, got %q then %q", got.Name, got2.Name)
+	}
+}
+
 // Parent inheritance should still be tried first (cheaper, no syscalls)
 // and should win when the parent is already known.
 func TestObserve_PrefersParentInheritanceOverOSQuery(t *testing.T) {

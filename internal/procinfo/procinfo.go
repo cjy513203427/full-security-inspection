@@ -30,6 +30,11 @@ type Cache struct {
 	m        map[uint32]*model.ProcessInfo
 	onUpdate func(model.ProcessInfo)
 
+	// lookupRetried marks PIDs for which Lookup has already paid for one
+	// synchronous OS query while the cached entry still had no Name (see
+	// Lookup's doc comment for why this exists and why it's capped at one).
+	lookupRetried map[uint32]bool
+
 	sigMu    sync.Mutex
 	sigCache map[string]sigResult // keyed by lower-cased image path
 
@@ -53,12 +58,13 @@ const enrichQueueSize = 2048
 
 func New(onUpdate func(model.ProcessInfo)) *Cache {
 	c := &Cache{
-		m:          make(map[uint32]*model.ProcessInfo),
-		onUpdate:   onUpdate,
-		sigCache:   make(map[string]sigResult),
-		jobs:       make(chan uint32, enrichQueueSize),
-		knownApps:  config.KnownBrowsers(),
-		suspicious: config.SuspiciousPathFragments(),
+		m:             make(map[uint32]*model.ProcessInfo),
+		onUpdate:      onUpdate,
+		lookupRetried: make(map[uint32]bool),
+		sigCache:      make(map[string]sigResult),
+		jobs:          make(chan uint32, enrichQueueSize),
+		knownApps:     config.KnownBrowsers(),
+		suspicious:    config.SuspiciousPathFragments(),
 	}
 	for i := 0; i < enrichWorkers; i++ {
 		go c.worker()
@@ -118,28 +124,58 @@ func (c *Cache) MarkExited(pid uint32, t time.Time) {
 }
 
 // Lookup returns what we know about pid, querying the OS synchronously
-// (cheap: one OpenProcess + QueryFullProcessImageName syscall pair) the
-// first time an unfamiliar PID is seen — e.g. a browser that was already
-// running before this tool started. Slow enrichment (signature + hash) is
-// queued to happen in the background.
+// (cheap: one OpenProcess + QueryFullProcessImageName syscall pair, plus a
+// Toolhelp32 snapshot walk) the first time an unfamiliar PID is seen — e.g.
+// a browser that was already running before this tool started. Slow
+// enrichment (signature + hash) is queued to happen in the background.
+//
+// The same synchronous query also fires once when the cached entry exists
+// but still has no Name — that happens when Observe() planted a placeholder
+// because the ETW process-start record itself had no ImageName and no
+// parent identity to inherit yet (see Observe's doc comment), and the
+// background enrichment worker hasn't resolved it yet. Without this,
+// HandleFile/HandleNet would keep returning that empty placeholder forever
+// for every subsequent event on the same PID, producing an "identity
+// unknown" alert for a process that was perfectly resolvable the entire
+// time — the process wasn't gone, the cache just never rechecked. Capped at
+// one retry per PID (lookupRetried) because HandleNet calls Lookup on every
+// single network event, not just alert-worthy ones, and the Toolhelp32 walk
+// is exactly the "expensive, keep off the hot ETW dispatch goroutine" path
+// Observe deliberately avoids — repeating it on every event for a PID that
+// truly never resolves (already exited by the time anyone asked) would risk
+// the same event-loss problem that split is there to prevent.
 func (c *Cache) Lookup(pid uint32) model.ProcessInfo {
 	c.mu.RLock()
 	p, ok := c.m[pid]
+	retried := c.lookupRetried[pid]
 	c.mu.RUnlock()
-	if ok {
+	if ok && (p.Name != "" || retried) {
 		return *p
 	}
 
-	pi := queryBasic(pid)
-	c.applyHeuristics(&pi)
+	qb := queryBasic(pid)
+	c.applyHeuristics(&qb)
 
 	c.mu.Lock()
-	cp := pi
+	defer c.mu.Unlock()
+	c.lookupRetried[pid] = true
+	if existing, ok := c.m[pid]; ok {
+		if existing.Name == "" && qb.Name != "" {
+			existing.Name = qb.Name
+			if existing.ImagePath == "" {
+				existing.ImagePath = qb.ImagePath
+			}
+			if existing.PPID == 0 {
+				existing.PPID = qb.PPID
+			}
+			c.applyHeuristics(existing)
+		}
+		return *existing
+	}
+	cp := qb
 	c.m[pid] = &cp
-	c.mu.Unlock()
-
 	c.queue(pid)
-	return pi
+	return qb
 }
 
 func (c *Cache) queue(pid uint32) {
