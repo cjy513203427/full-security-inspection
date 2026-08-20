@@ -3,6 +3,7 @@
 package correlate
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -195,6 +196,59 @@ func TestNoAlert_ChromeSandboxedChildInheritsParentIdentity(t *testing.T) {
 
 	if got := sink.byRule("sensitive_file_access"); len(got) != 0 {
 		t.Fatalf("Chrome's own sandboxed child should inherit chrome.exe's identity and not alert, got %+v", got)
+	}
+}
+
+// This is the exact false positive reported in production: a signed
+// msedgewebview2.exe (WebView2 runtime, embedded by VS Code and countless
+// other apps) reads its own isolated cookie jar. WebView2's on-disk layout
+// mirrors a real Chromium profile (it also has a "Network\Cookies" file),
+// but it lives under its own app-specific user-data folder, not under any
+// real browser's "...\User Data\" — so unlike the sandboxed-child case
+// above, there's no parent identity to inherit from either. Before
+// BasePath scoping this matched Chrome's pattern (first in the list, and
+// bare "network\cookies" matches anything) and was flagged as "a non-owner
+// process reading Chrome's credentials". It must not alert at all: this
+// isn't Chrome's or Edge's data, so no target should match it.
+func TestNoAlert_WebView2OwnIsolatedCookieStore(t *testing.T) {
+	e, sink := newTestEngine()
+
+	const webviewPID = 91105
+	e.procs.Observe(model.ProcessInfo{
+		PID: webviewPID, Name: "msedgewebview2.exe",
+		ImagePath: `C:\Program Files (x86)\Microsoft\EdgeWebView\Application\151.0.4129.78\msedgewebview2.exe`,
+		StartTime: time.Now(),
+	})
+
+	e.HandleFile(`C:\Users\bob\AppData\Local\SomeApp\EBWebView\Default\Network\Cookies`, webviewPID, model.FileOpen)
+
+	if got := sink.byRule("sensitive_file_access"); len(got) != 0 {
+		t.Fatalf("expected no alert for WebView2 touching its own isolated cookie jar outside any real browser profile, got %+v", got)
+	}
+}
+
+// The other side of the same fix: a non-owner process reading Edge's *real*
+// browser profile cookies must still be caught, and correctly labeled as
+// Edge rather than mislabeled as Chrome just because Chrome is first in the
+// chromiumBrowsers list and the bare filename pattern used to match either.
+func TestExfilCorrelation_NonOwnerReadsRealEdgeCookies_LabeledCorrectly(t *testing.T) {
+	e, sink := newTestEngine()
+
+	const evilPID = 91106
+	e.procs.Observe(model.ProcessInfo{
+		PID: evilPID, Name: "evil.exe",
+		ImagePath: `C:\Users\bob\AppData\Local\Temp\evil.exe`,
+		StartTime: time.Now(),
+	})
+
+	e.HandleFile(`C:\Users\bob\AppData\Local\Microsoft\Edge\User Data\Default\Network\Cookies`, evilPID, model.FileOpen)
+
+	got := sink.byRule("sensitive_file_access")
+	if len(got) != 1 {
+		t.Fatalf("expected 1 alert for non-owner reading Edge's real cookies, got %d: %+v", len(got), got)
+	}
+	if !strings.Contains(got[0].Title, "Edge") {
+		t.Fatalf("expected the alert to name Edge (not Chrome, which is just first in the list), got title %q", got[0].Title)
 	}
 }
 

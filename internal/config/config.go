@@ -10,6 +10,7 @@ type SensitiveTarget struct {
 	App      string   // display name, e.g. "Chrome Cookies", "Google 账号密码"
 	Category string   // "cookie" | "password" | "token" | "config"
 	Pattern  string   // lower-cased, drive/device-agnostic substring to match against the reported file path
+	BasePath string   // optional second required substring, also lower-cased/drive-agnostic (see below)
 	Critical bool     // true = this is a session/credential store (cookie theft target)
 	Owners   []string // process image names (lower-case, no path) that are expected/normal to touch this file
 }
@@ -47,10 +48,26 @@ func SensitiveTargets() []SensitiveTarget {
 
 	var targets []SensitiveTarget
 
+	// "Network\Cookies" and "Login Data" are the same relative filename
+	// across every Chromium-based browser AND every app that embeds the
+	// Chromium/Edge WebView2 runtime (VS Code, and countless other desktop
+	// apps) for its own unrelated, isolated cookie jar — WebView2's on-disk
+	// layout mirrors a real browser profile's. Without BasePath scoping,
+	// Pattern alone would match any of those against whichever browser
+	// happens to be first in this slice (Chrome), mislabeling e.g. a signed
+	// msedgewebview2.exe reading its own local cookies as "a non-owner
+	// process reading Chrome's credentials" — a real false positive
+	// observed in production. BasePath requires the match to actually sit
+	// inside that specific browser's own profile folder, so an embedded
+	// WebView2 instance with its own isolated user-data folder elsewhere on
+	// disk doesn't match any browser here at all (correctly: it isn't
+	// touching Chrome's or Edge's data), while a process that touches a
+	// real browser's actual profile folder is still caught exactly as
+	// before.
 	for _, b := range chromiumBrowsers {
 		targets = append(targets,
-			SensitiveTarget{App: b.app + " Cookies 数据库", Category: "cookie", Pattern: "network\\cookies", Critical: true, Owners: []string{b.owner}},
-			SensitiveTarget{App: b.app + " 保存的密码", Category: "password", Pattern: "login data", Critical: true, Owners: []string{b.owner}},
+			SensitiveTarget{App: b.app + " Cookies 数据库", Category: "cookie", Pattern: "network\\cookies", BasePath: b.base, Critical: true, Owners: []string{b.owner}},
+			SensitiveTarget{App: b.app + " 保存的密码", Category: "password", Pattern: "login data", BasePath: b.base, Critical: true, Owners: []string{b.owner}},
 			SensitiveTarget{App: b.app + " Local Storage(可能含网页 token)", Category: "token", Pattern: b.base + `default\local storage`, Critical: false, Owners: []string{b.owner}},
 		)
 	}

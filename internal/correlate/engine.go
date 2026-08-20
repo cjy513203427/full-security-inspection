@@ -482,14 +482,23 @@ func matchTarget(targets []config.SensitiveTarget, lowerPath string) (config.Sen
 	var fallback config.SensitiveTarget
 	haveFallback := false
 	for _, t := range targets {
-		if strings.Contains(lowerPath, t.Pattern) {
-			if t.Critical {
-				return t, true
-			}
-			if !haveFallback {
-				fallback = t
-				haveFallback = true
-			}
+		if !strings.Contains(lowerPath, t.Pattern) {
+			continue
+		}
+		// BasePath, when set, scopes a generic filename pattern (e.g.
+		// "network\cookies", identical across every Chromium-based browser
+		// and every app embedding the WebView2 runtime for its own
+		// unrelated cookie jar) to one specific app's own profile folder —
+		// see the doc comment on the chromiumBrowsers loop in config.go.
+		if t.BasePath != "" && !strings.Contains(lowerPath, t.BasePath) {
+			continue
+		}
+		if t.Critical {
+			return t, true
+		}
+		if !haveFallback {
+			fallback = t
+			haveFallback = true
 		}
 	}
 	return fallback, haveFallback
