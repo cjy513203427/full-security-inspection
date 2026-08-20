@@ -55,6 +55,33 @@ go vet ./...
 - Tray icons (`internal/tray/assets/*.ico`) are checked-in pre-generated artifacts, not built by
   `build.ps1`. Regenerate via `go run tools\genicon\main.go` only if you change the RGBA values in
   [tools/genicon/main.go](tools/genicon/main.go).
+- The exe's own icon (Explorer/taskbar/Alt-Tab/window titlebar, as opposed to the tray icon above)
+  comes from [cmd/netwatch/rsrc_windows_amd64.syso](cmd/netwatch/rsrc_windows_amd64.syso), a
+  checked-in Windows resource object that plain `go build` links in automatically — no
+  `build.ps1` changes needed, no new go.mod dependency. Its source is
+  [assets/appicon/icon.ico](assets/appicon/icon.ico) (a multi-size 16–256px rendering of the same
+  shield mark used for the "shield" icon in the web dashboard's SVG sprite —
+  [tools/genappicon/main.go](tools/genappicon/main.go) reproduces that exact path) plus
+  [assets/appicon/winres.json](assets/appicon/winres.json), which controls how `go-winres`
+  packs it. Only regenerate if you change the mark itself:
+  ```powershell
+  go run tools\genappicon\main.go
+  go install github.com/tc-hib/go-winres@latest
+  go-winres make --in assets\appicon\winres.json --arch amd64 --out cmd\netwatch\rsrc
+  ```
+  Two non-obvious things `winres.json` encodes, both required — don't "simplify" this back to
+  `go-winres simply`:
+  - **The icon must be resource ID 3, not 1.** Wails' own window/taskbar icon loader
+    (`winc.NewIconFromResource(instance, winc.AppIconID)`, `AppIconID = 3`, internal to
+    `wailsapp/wails/v2` so it can't be overridden from `cmd/netwatch`) looks up the icon by that
+    exact numeric ID; `go-winres simply` puts it at ID 1 instead, which Wails silently fails to
+    find and falls back to a generic default icon — the window/taskbar icon looks unset even
+    though the exe file's own icon (Explorer, e.g.) is fine. `winres.json`'s
+    `"RT_GROUP_ICON": {"#3": ...}` pins it to the ID Wails actually looks for.
+  - **The manifest must stay `asInvoker`** (`"execution-level": ""`) — the app does its own
+    on-demand UAC elevation (see `elevate_windows.go`'s `relaunchElevated`). A
+    `requireAdministrator` manifest would force a UAC prompt on every launch, including
+    flag-only invocations like `-clean-logs` that don't need it.
 
 ### What the test suite actually covers
 

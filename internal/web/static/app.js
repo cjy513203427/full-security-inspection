@@ -6,7 +6,14 @@
   const MAX_ROWS = 400; // DOM rows kept per table/list, for render performance
   const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
   const SEV_LABEL = { critical: '严重', high: '高', medium: '中', low: '低', info: '信息' };
-  const SEV_ICON = { critical: '⛔', high: '🔺', medium: '⚠️', low: '🟢', info: 'ℹ️' };
+  const SEV_ICON_NAME = { critical: 'alert-octagon', high: 'alert-triangle', medium: 'alert-circle', low: 'check-circle', info: 'info' };
+
+  // Inline SVG icons, resolved against the <symbol> sprite embedded in
+  // index.html — self-hosted, no icon font/CDN, matches the app's
+  // "loads no external resources" guarantee.
+  function icon(name, cls) {
+    return `<svg class="icon${cls ? ' ' + cls : ''}"><use href="#icon-${name}"/></svg>`;
+  }
 
   const state = {
     alerts: [],
@@ -56,7 +63,7 @@
     if (proc.sha256) rows.push(['SHA-256', esc(proc.sha256) + ' <a href="https://www.virustotal.com/gui/search/' + esc(proc.sha256) + '" target="_blank" rel="noopener">用 VirusTotal 查这个哈希 ↗</a>']);
     if (proc.startTime) rows.push(['进程启动时间', fmtTime(proc.startTime)]);
     if (!rows.length) return '';
-    return `<details class="evidence"><summary>🔎 证据详情</summary><table class="evidence-table">${
+    return `<details class="evidence"><summary>${icon('search')} 证据详情</summary><table class="evidence-table">${
       rows.map(([k, v]) => `<tr><td class="evidence-key">${k}</td><td class="mono wrap">${v}</td></tr>`).join('')
     }</table></details>`;
   }
@@ -203,7 +210,9 @@
   // title/taskbar entry (not just the in-page <title>), so it's visible
   // even when the window is minimized or behind other apps.
   function setTitleBadge(count) {
-    const title = count > 0 ? `🔴 (${count}) NetWatch CookieGuard` : 'NetWatch CookieGuard';
+    // The native OS window/taskbar title can't render inline SVG, so this
+    // uses a plain Unicode glyph (not an emoji) as a text-only marker.
+    const title = count > 0 ? `● (${count}) NetWatch CookieGuard` : 'NetWatch CookieGuard';
     document.title = title;
     if (window.runtime && window.runtime.WindowSetTitle) {
       try { window.runtime.WindowSetTitle(title); } catch {}
@@ -275,20 +284,20 @@
       const proc = a.process || state.procs.get(a.pid);
       const identityUnknown = !proc || !proc.name;
       const procChip = identityUnknown
-        ? `<span class="chip unsigned">❓ 身份不明 · PID ${a.pid || '-'}</span>`
+        ? `<span class="chip unsigned">${icon('help-circle')} 身份不明 · PID ${a.pid || '-'}</span>`
         : `<span class="chip">${esc(proc.name)}${proc.nameInherited ? ' (继承自父进程)' : ''} · PID ${a.pid || '-'}</span>`;
       const signedChip = proc && proc.sigChecked
-        ? (proc.signed ? `<span class="chip">✓ 已签名${proc.signerName ? ': ' + esc(truncate(proc.signerName, 20)) : ''}</span>` : `<span class="chip unsigned">⚠ 未签名</span>`)
+        ? (proc.signed ? `<span class="chip">${icon('check')} 已签名${proc.signerName ? ': ' + esc(truncate(proc.signerName, 20)) : ''}</span>` : `<span class="chip unsigned">${icon('alert-triangle')} 未签名</span>`)
         : '';
       const knownChip = proc && proc.known ? `<span class="chip known">常见浏览器</span>` : '';
-      const suspChip = proc && proc.suspiciousLoc ? `<span class="chip unsigned">📁 可疑路径</span>` : '';
-      const aiChip = a.aiService ? `<span class="chip known">🤖 ${esc(a.aiService)}</span>` : '';
+      const suspChip = proc && proc.suspiciousLoc ? `<span class="chip unsigned">${icon('folder')} 可疑路径</span>` : '';
+      const aiChip = a.aiService ? `<span class="chip known">${icon('bot')} ${esc(a.aiService)}</span>` : '';
       const evidence = renderEvidence(proc);
       return `
         <div class="alert-card sev-${sev} ${a.ack ? 'ack' : ''}" data-seq="${a.seq}">
           <div class="alert-body">
             <div class="alert-top-row">
-              <span class="badge sev-${sev}"><span class="icon">${SEV_ICON[sev] || 'ℹ️'}</span>${SEV_LABEL[sev] || sev}</span>
+              <span class="badge sev-${sev}">${icon(SEV_ICON_NAME[sev] || 'info')}${SEV_LABEL[sev] || sev}</span>
               ${procChip}
               ${signedChip}${suspChip}${knownChip}${aiChip}
               <span class="spacer"></span>
@@ -298,7 +307,7 @@
             <div class="alert-detail">${esc(a.detail)}</div>
             ${evidence}
           </div>
-          ${a.ack ? '' : `<button class="ack-btn" data-ack="${a.seq}">✓ 确认</button>`}
+          ${a.ack ? '' : `<button class="ack-btn" data-ack="${a.seq}">${icon('check')} 确认</button>`}
         </div>`;
     }).join('');
   }
@@ -357,7 +366,7 @@
         <td class="mono">${esc(c.remoteAddr)}</td>
         <td class="num">${c.remotePort || ''}</td>
         <td>${c.domain ? esc(c.domain) : '<span style="color:var(--text-muted)">—</span>'}</td>
-        <td>${c.aiService ? `<span class="chip known">🤖 ${esc(c.aiService)}</span>` : ''}</td>
+        <td>${c.aiService ? `<span class="chip known">${icon('bot')} ${esc(c.aiService)}</span>` : ''}</td>
       </tr>`;
     }).join('');
   }
@@ -378,7 +387,7 @@
     list = list.slice(0, MAX_ROWS);
 
     document.getElementById('fileBody').innerHTML = list.map(f => {
-      const ownFlag = f.ownFile ? '<span class="dot-flag dot-ok"></span>本体访问' : '<span class="dot-flag dot-critical"></span>⚠ 非本体访问';
+      const ownFlag = f.ownFile ? '<span class="dot-flag dot-ok"></span>本体访问' : `<span class="dot-flag dot-critical"></span>${icon('alert-triangle')} 非本体访问`;
       return `<tr>
         <td>${fmtTime(f.time)}</td>
         <td>${esc(f.procName || '?')}</td>
@@ -406,7 +415,7 @@
         <td>${fmtTime(d.time)}</td>
         <td>${esc(d.procName || '?')}</td>
         <td class="num">${d.pid}</td>
-        <td class="mono">${esc(d.query)}${d.aiService ? ` <span class="chip known">🤖 ${esc(d.aiService)}</span>` : ''}</td>
+        <td class="mono">${esc(d.query)}${d.aiService ? ` <span class="chip known">${icon('bot')} ${esc(d.aiService)}</span>` : ''}</td>
         <td class="mono wrap">${esc((d.results || []).join(', '))}</td>
       </tr>`).join('');
   }
@@ -431,13 +440,13 @@
         // never possible — this is a dead end, not "still working on it".
         sig = '<span style="color:var(--text-muted)">无法验证(身份不明)</span>';
       } else if (p.sigChecked) {
-        sig = p.signed ? `<span class="chip">✓ ${esc(truncate(p.signerName || '已签名', 22))}</span>` : `<span class="chip unsigned">⚠ 未签名</span>`;
+        sig = p.signed ? `<span class="chip">${icon('check')} ${esc(truncate(p.signerName || '已签名', 22))}</span>` : `<span class="chip unsigned">${icon('alert-triangle')} 未签名</span>`;
       } else {
         sig = '<span style="color:var(--text-muted)">检查中…</span>';
       }
       const status = p.exited ? '<span class="chip">已退出</span>' : '<span class="chip known">运行中</span>';
-      const susp = p.suspiciousLoc ? ' <span class="chip unsigned">📁 可疑路径</span>' : '';
-      const name = p.name ? esc(p.name) + (p.nameInherited ? ' <span style="color:var(--text-muted);font-size:11px">(继承自父进程)</span>' : '') : '<span class="chip unsigned">❓ 身份不明</span>';
+      const susp = p.suspiciousLoc ? ` <span class="chip unsigned">${icon('folder')} 可疑路径</span>` : '';
+      const name = p.name ? esc(p.name) + (p.nameInherited ? ' <span style="color:var(--text-muted);font-size:11px">(继承自父进程)</span>' : '') : `<span class="chip unsigned">${icon('help-circle')} 身份不明</span>`;
       return `<tr>
         <td>${name}</td>
         <td class="num">${p.pid}</td>
@@ -483,7 +492,8 @@
 
   document.getElementById('pauseBtn').addEventListener('click', (ev) => {
     state.paused = !state.paused;
-    ev.target.textContent = state.paused ? '▶ 恢复刷新' : '⏸ 暂停刷新';
+    const btn = ev.target.closest('#pauseBtn');
+    btn.innerHTML = state.paused ? `${icon('play')} 恢复刷新` : `${icon('pause')} 暂停刷新`;
     if (!state.paused) renderAll();
   });
 

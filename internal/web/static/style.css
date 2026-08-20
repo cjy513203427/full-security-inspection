@@ -53,6 +53,22 @@
 
 * { box-sizing: border-box; }
 
+.icon-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+.icon {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  vertical-align: -2px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.icon-lg { width: 17px; height: 17px; vertical-align: -3px; }
+.icon-xl { width: 34px; height: 34px; stroke-width: 1.5; color: var(--text-muted); }
+
 html, body {
   margin: 0;
   padding: 0;
@@ -275,7 +291,7 @@ main {
   border-radius: 999px;
   white-space: nowrap;
 }
-.badge .icon { font-size: 11px; line-height: 1; }
+.badge .icon { width: 12px; height: 12px; vertical-align: -1px; }
 
 .badge.sev-critical { background: color-mix(in srgb, var(--status-critical) 16%, transparent); color: var(--status-critical); }
 .badge.sev-high { background: color-mix(in srgb, var(--status-serious) 18%, transparent); color: var(--status-serious); }
@@ -420,7 +436,7 @@ td.wrap { white-space: normal; word-break: break-all; }
   text-align: center;
   color: var(--text-muted);
 }
-.empty-state .big { font-size: 26px; margin-bottom: 8px; }
+.empty-state .big { margin-bottom: 10px; }
 
 footer.note {
   color: var(--text-muted);
