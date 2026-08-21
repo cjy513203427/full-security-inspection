@@ -106,8 +106,14 @@ instead cover everything around them:
   covered here — it was validated manually against real domains during development instead.
 - [internal/i18n/i18n_test.go](internal/i18n/i18n_test.go) — every catalog key has all three
   languages, and multi-argument templates' `%[n]` indices match across languages (catches a
-  translation that silently drops or duplicates a placeholder), plus `T`/`ParseLang`/`SetSession`
-  behavior. The dashboard-side catalog ([internal/web/static/i18n.js](internal/web/static/i18n.js))
+  translation that silently drops or duplicates a placeholder); also statically rejects any
+  `%[n]` combined with a flag/width/precision before the verb (`%[4].0f` and the like) — Go's fmt
+  package doesn't error on that combination anywhere at build/vet/test time, it just renders
+  garbage (`%!f(BADINDEX)`) into the string at runtime, which is exactly what shipped in
+  `alert.beacon.detail` before this test existed (see that catalog entry's comment, and
+  `correlate.trackBeacon`'s call site, which does the rounding in Go and passes a plain string
+  instead). Plus `T`/`ParseLang`/`SetSession` behavior. The dashboard-side catalog
+  ([internal/web/static/i18n.js](internal/web/static/i18n.js))
   has no Go test coverage since it's plain JS — it was cross-checked ad hoc for the same
   invariants (key parity across languages, every `data-i18n`/`i18n.T()` reference resolving to a
   real key) during development instead.

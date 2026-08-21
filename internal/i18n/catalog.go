@@ -342,10 +342,17 @@ var catalog = map[string]map[Lang]string{
 		EN: "🤖 Regular heartbeat-style connections detected to %s",
 		DE: "🤖 Regelmäßige Heartbeat-Verbindungen zu %s erkannt",
 	},
+	// %[4]/%[6] are pre-formatted whole-number strings (%s), not raw floats
+	// rendered with "%[N].0f" — Go's fmt package rejects combining an
+	// explicit argument index with a width/precision on the same verb, and
+	// doesn't do it loudly: it silently renders "%!f(BADINDEX)" into the
+	// alert text instead of erroring anywhere at build or test time. See
+	// correlate.trackBeacon's call site, which does the rounding before
+	// calling i18n.T.
 	"alert.beacon.detail": {
-		ZH: "%[1]s (PID %[2]d) 在过去 %[3]d 秒内以约 %[4].0f 秒的间隔反复连接 %[5]s,间隔非常规律(抖动 < %[6].0f%%),不像正常用户交互产生的流量。",
-		EN: "%[1]s (PID %[2]d) repeatedly connected to %[5]s at roughly %[4].0f-second intervals over the past %[3]d seconds — the timing is unusually regular (jitter < %[6].0f%%), not typical of normal user-driven traffic.",
-		DE: "%[1]s (PID %[2]d) hat sich in den letzten %[3]d Sekunden wiederholt in etwa %[4].0f-Sekunden-Abständen mit %[5]s verbunden – das Timing ist ungewöhnlich regelmäßig (Schwankung < %[6].0f%%), untypisch für normalen, nutzergesteuerten Datenverkehr.",
+		ZH: "%[1]s (PID %[2]d) 在过去 %[3]d 秒内以约 %[4]s 秒的间隔反复连接 %[5]s,间隔非常规律(抖动 < %[6]s%%),不像正常用户交互产生的流量。",
+		EN: "%[1]s (PID %[2]d) repeatedly connected to %[5]s at roughly %[4]s-second intervals over the past %[3]d seconds — the timing is unusually regular (jitter < %[6]s%%), not typical of normal user-driven traffic.",
+		DE: "%[1]s (PID %[2]d) hat sich in den letzten %[3]d Sekunden wiederholt in etwa %[4]s-Sekunden-Abständen mit %[5]s verbunden – das Timing ist ungewöhnlich regelmäßig (Schwankung < %[6]s%%), untypisch für normalen, nutzergesteuerten Datenverkehr.",
 	},
 	"common.list_sep": {
 		ZH: "、",

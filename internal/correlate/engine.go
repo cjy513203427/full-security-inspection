@@ -398,8 +398,17 @@ func (e *Engine) trackBeacon(ne model.NetEvent, proc model.ProcessInfo) {
 		Severity: scoreToSeverity(score),
 		Rule:     "beaconing",
 		Title:    title,
+		// mean/jitter are pre-formatted to whole-number strings here rather
+		// than left as floats for the template to round via "%[N].0f": Go's
+		// fmt package doesn't allow an explicit argument index ([N]) to be
+		// combined with a width/precision on the same verb — that combo
+		// silently renders as "%!f(BADINDEX)" instead of erroring at compile
+		// time, which is exactly what shipped in production here (see the
+		// git history/CLAUDE.md note on this). %[N]s with a pre-rounded
+		// string sidesteps the restriction entirely.
 		Detail: i18n.T("alert.beacon.detail",
-			ne.ProcName, ne.PID, config.BeaconWindowSeconds, mean, dest, config.BeaconJitterFraction*100),
+			ne.ProcName, ne.PID, config.BeaconWindowSeconds,
+			fmt.Sprintf("%.0f", mean), dest, fmt.Sprintf("%.0f", config.BeaconJitterFraction*100)),
 		PID:       ne.PID,
 		ProcName:  ne.ProcName,
 		ImagePath: proc.ImagePath,

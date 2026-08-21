@@ -80,6 +80,36 @@ func sortedKeys(m map[string]bool) []string {
 	return out
 }
 
+// argIndexBadCombinationPattern matches Go fmt's explicit argument-index
+// notation ("%[n]") immediately followed by anything other than the verb
+// letter itself — a flag, width, or precision sitting between the index
+// and the verb. That's syntactically plausible-looking but fmt silently
+// refuses to combine an explicit index with any of those: at runtime it
+// renders garbage into the output ("%!f(BADINDEX)" for a width/precision,
+// "%!+(int=5)d" for a flag, ...) rather than failing anywhere at build,
+// vet, or `go test` time for the naive case of just running the code.
+// This exact thing shipped to production once already —
+// "alert.beacon.detail" used "%[4].0f"/"%[6].0f" for its mean/jitter
+// fields, and every beacon alert's detail text carried literal
+// "%!f(BADINDEX)" instead of a number. The fix is always the same:
+// pre-format the value to a string in the Go call site and reference it
+// here with a bare "%[n]s".
+var argIndexBadCombinationPattern = regexp.MustCompile(`%\[\d+\][^a-zA-Z]`)
+
+func TestCatalogNoExplicitIndexWithWidthOrPrecision(t *testing.T) {
+	for key, variants := range catalog {
+		for _, l := range []Lang{ZH, EN, DE} {
+			tmpl, ok := variants[l]
+			if !ok {
+				continue // already reported by TestCatalogHasAllLanguagesForEveryKey
+			}
+			if m := argIndexBadCombinationPattern.FindString(tmpl); m != "" {
+				t.Errorf("catalog key %q (%s): explicit argument index combined with a flag/width/precision (%q) — fmt silently renders this as garbage instead of the value; pre-format the value to a string in Go and use a bare %%[n]s here instead", key, l, m)
+			}
+		}
+	}
+}
+
 func TestParseLang(t *testing.T) {
 	cases := []struct {
 		in   string
