@@ -97,3 +97,33 @@ func (r *RotatingFile) Close() error {
 	r.f = nil
 	return err
 }
+
+// Reopen reopens path for appending after a prior Close, picking up
+// whatever size it currently has on disk — 0 if it no longer exists (e.g.
+// deleted by cleanLogFiles while this was closed), otherwise whatever a
+// concurrent writer/rotation may have left it at. A no-op if already open.
+//
+// This exists so a paused producer (see monitorController.Stop in
+// cmd/netwatch) can release its file handle — letting Windows actually
+// delete the file out from under it — without losing the RotatingFile
+// instance itself: callers elsewhere (jsonlWriter, log.SetOutput) keep
+// their existing *RotatingFile pointer valid across the close/reopen
+// instead of needing to be rewired to a freshly constructed one.
+func (r *RotatingFile) Reopen() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.f != nil {
+		return nil
+	}
+	f, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	var size int64
+	if info, statErr := f.Stat(); statErr == nil {
+		size = info.Size()
+	}
+	r.f = f
+	r.size = size
+	return nil
+}

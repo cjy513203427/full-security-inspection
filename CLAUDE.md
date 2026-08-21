@@ -209,13 +209,33 @@ internal/certcheck (periodic active TLS probes) ──────────�
   There are two distinct, deliberately non-overlapping "stop" actions, both reachable from the
   dashboard's Settings modal (previously only the tray's right-click menu could stop anything at
   all, which is why both buttons exist now):
-  - **Stop Monitoring** (`App.StopMonitoring`/`StartMonitoring`) pauses/resumes only the ETW
+  - **Stop Monitoring** (`App.StopMonitoring`/`StartMonitoring`) pauses/resumes the ETW
     collector and cert-check prober, via [monitor.go](cmd/netwatch/monitor.go)'s
     `monitorController` — the window, tray, store, and process all stay up, so e.g. Clean Logs
     stays reachable. `Start` always *rebuilds* a fresh `etwmon.Collector`/`certcheck.Checker`
     rather than reusing the stopped ones — `certcheck.Checker.Stop` closes its own `stopCh`
     exactly once, so calling `Start` again on that same instance would find it already
     permanently closed and exit its loop immediately, silently monitoring nothing.
+    `Stop`/`Start` also close/reopen the on-disk log file handles (the store's five JSONL logs
+    plus `netwatch.log`, via `Store.CloseLogFiles`/`ReopenLogFiles` and
+    `RotatingFile.Close`/`Reopen`) — not just the collector/checker that feed them, since those
+    files are opened `O_APPEND` without `FILE_SHARE_DELETE` and Windows refuses to delete a file
+    for as long as any handle to it is open, independent of whether anything is actively being
+    written. The store's in-memory ring buffers/subscribers/alert history are untouched by this —
+    only the on-disk file handles are cycled.
+
+    The settings panel's **Clean Logs** button (`App.CleanLogs`, in
+    [app_settings.go](cmd/netwatch/app_settings.go)) is what actually relies on this, and it does
+    so itself rather than requiring the user to click Stop Monitoring first: if monitoring is
+    running when Clean Logs is clicked, `CleanLogs` calls `mon.Stop()`, deletes, then `mon.Start()`
+    to resume — so *one click always fully cleans* regardless of monitoring state, at the cost of
+    a brief collection gap while the ETW session gets torn down and rebuilt (same gap a manual
+    Stop/Start would cause; this just automates it). Before this, only exiting the whole process
+    (`st.Close()` in `doQuit`) ever released those handles, which made Clean Logs silently fail on
+    the active files while the app was merely running — the dashboard's copy for that case
+    (`settings.clean_logs_partial` in [i18n.js](internal/web/static/i18n.js)) now describes the
+    genuinely-remaining case (some *other* process, e.g. antivirus, has one of these files locked),
+    not "go stop monitoring first".
   - **Exit Program** (`App.Quit`) actually ends the process. `main()` builds this shutdown
     sequence once, as a `doQuit` closure, and both the tray's "Exit Program" menu item and the
     dashboard's button call the exact same one (`App.SetQuitFunc(doQuit)`) — sharing it rather

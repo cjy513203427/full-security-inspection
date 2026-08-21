@@ -151,9 +151,15 @@ func main() {
 	// Plain-text status log, not the JSONL event logs — much lower volume
 	// (a line per alert/startup, not per raw event) so a smaller rotation
 	// threshold than store.LogMaxBytes is plenty.
-	if logFile, err := store.NewRotatingFile(filepath.Join(*dataDir, "netwatch.log"), 5<<20, 3); err == nil {
-		log.SetOutput(io.MultiWriter(os.Stderr, logFile))
-		// (not deferring logFile.Close(): see the note below about why
+	// Kept as a named var (rather than scoped to the if, as before) and
+	// handed to monitorController below: Stop Monitoring closes this same
+	// handle so the settings panel's Clean Logs can delete it, and Start
+	// Monitoring reopens it — see monitor.go's doc comment.
+	var appLog *store.RotatingFile
+	if lf, err := store.NewRotatingFile(filepath.Join(*dataDir, "netwatch.log"), 5<<20, 3); err == nil {
+		appLog = lf
+		log.SetOutput(io.MultiWriter(os.Stderr, appLog))
+		// (not deferring appLog.Close(): see the note below about why
 		// defers don't run on this process's exit paths — the OS reclaims
 		// the handle fine either way.)
 	}
@@ -248,7 +254,7 @@ func main() {
 		_ = certChecker.Start(ctx) // always succeeds — see Start's doc comment
 	}
 
-	mon := newMonitorController(buildCollector, buildChecker)
+	mon := newMonitorController(buildCollector, buildChecker, st, appLog)
 	mon.adopt(collector, certChecker, cancel)
 
 	assets, err := web.Assets()
@@ -410,12 +416,19 @@ var logFileBaseNames = []string{
 // avoids leaving a process's open append handle pointing at a truncated
 // file with a stale offset.
 //
-// If the monitor is currently running, the active files are locked
-// (Windows won't let another process delete/rename a file that process has
-// open without FILE_SHARE_DELETE, which this tool doesn't request) and
-// os.Remove fails — that failure is surfaced to the caller rather than
-// silently skipped, so the user gets a clear "close it first" message
-// instead of a cleanup that quietly did nothing.
+// This function itself doesn't know or care whether a monitor process is
+// running elsewhere — it just tries the delete. Called from the -clean-logs
+// CLI flag path there's never a conflict (that's a standalone invocation
+// that returns before any store/log file gets opened). Called from
+// App.CleanLogs against an already-running instance's own data directory,
+// the active files are locked for as long as that instance's monitoring is
+// running (Windows won't let even the process that opened a file
+// delete/rename it without FILE_SHARE_DELETE, which this tool doesn't
+// request) — App.StopMonitoring closes those handles specifically so this
+// can succeed without exiting; see its doc comment. Either way, a locked
+// file's os.Remove failure is surfaced to the caller rather than silently
+// skipped, so the user gets a clear message instead of a cleanup that
+// quietly did nothing.
 func cleanLogFiles(dataDir string) (freedBytes int64, err error) {
 	var firstErr error
 	for _, base := range logFileBaseNames {

@@ -690,9 +690,10 @@
     resultEl.textContent = '';
     try {
       // CleanLogs never rejects (see its Go doc comment: a partial clean —
-      // some files freed, some still in use because monitoring is running
-      // — is an expected outcome to display, not a failed call), so this
-      // branch only fires on a genuine IPC-level failure.
+      // some file(s) still locked by something other than this process
+      // itself, since CleanLogs already pauses/resumes monitoring around
+      // its own delete — is an expected outcome to display, not a failed
+      // call), so this branch only fires on a genuine IPC-level failure.
       const res = await window.go.main.App.CleanLogs();
       const mb = (res.freedBytes / (1024 * 1024)).toFixed(1);
       let msg = i18n.t('settings.clean_logs_done', mb);
@@ -702,6 +703,10 @@
       resultEl.textContent = i18n.t('settings.clean_logs_failed', String(e));
     } finally {
       btn.disabled = false;
+      // CleanLogs may have paused/resumed monitoring around its own
+      // delete (see its Go doc comment) — re-fetch so the "监控状态" hint
+      // above never shows stale text if a resume happened to fail.
+      refreshMonitorStatus();
     }
   });
 

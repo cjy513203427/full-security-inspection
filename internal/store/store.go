@@ -119,11 +119,45 @@ func New(dataDir string) (*Store, error) {
 }
 
 func (s *Store) Close() {
+	s.CloseLogFiles()
+}
+
+// CloseLogFiles closes every JSONL log's underlying file handle without
+// touching anything else — in-memory ring buffers, the process map,
+// pub/sub subscribers, alert sequence counter all stay exactly as they
+// are. Close (above) is this same operation under a name meant for final
+// process shutdown; CloseLogFiles is the same mechanics exposed under a
+// name that makes sense to call mid-run, paired with a later
+// ReopenLogFiles.
+//
+// This is what lets cmd/netwatch's "Stop Monitoring" release the on-disk
+// files' Windows file handles (append-mode handles block deletion of the
+// file by anyone, including this same process, for as long as they're
+// open) so the settings panel's Clean Logs button can actually delete the
+// active log files while the app keeps running — see monitorController.Stop.
+func (s *Store) CloseLogFiles() {
 	s.netLog.Close()
 	s.dnsLog.Close()
 	s.fileLog.Close()
 	s.alertLog.Close()
 	s.certCheckLog.Close()
+}
+
+// ReopenLogFiles reopens every JSONL log for appending after a prior
+// CloseLogFiles — e.g. once StartMonitoring resumes collection and there's
+// data to write again. Best-effort across all five: it keeps going and
+// reports only the first error, matching jsonlWriter.Write's existing
+// policy of a broken log file degrading rather than taking the monitor
+// down. A file CleanLogs deleted while closed is simply recreated empty,
+// same as a fresh Store.New would.
+func (s *Store) ReopenLogFiles() error {
+	var firstErr error
+	for _, w := range []*jsonlWriter{s.netLog, s.dnsLog, s.fileLog, s.alertLog, s.certCheckLog} {
+		if err := w.rf.Reopen(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // --- writers -----------------------------------------------------------
