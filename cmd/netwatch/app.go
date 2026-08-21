@@ -16,6 +16,12 @@ import (
 type App struct {
 	st *store.Store
 
+	// dataDir is where this instance logs/stores its JSONL history and
+	// netwatch.log — plumbed through from main()'s -data-dir flag so the
+	// settings panel's log-directory display/open/clean actions (see
+	// app_settings.go) don't need their own separate path resolution.
+	dataDir string
+
 	// ctx is written once, from Wails' OnStartup callback, and read from
 	// other goroutines afterward (the tray icon's click handlers, the
 	// critical-count poller). Those reads can in principle happen before
@@ -26,10 +32,23 @@ type App struct {
 	// show/quit request.
 	ctxMu sync.RWMutex
 	ctx   context.Context
+
+	// quitFn is main()'s doQuit closure (set once, right after
+	// construction, via SetQuitFunc) — the single real shutdown sequence
+	// shared between the tray's "Exit Program" menu item and Quit, below,
+	// so the dashboard's own settings-modal button doesn't need (and
+	// can't accidentally drift from) its own copy of that ordering.
+	quitFn func()
+
+	// mon is main()'s monitorController (set once via SetMonitor) — lets
+	// the dashboard's "Stop Monitoring"/"Start Monitoring" toggle
+	// (app_settings.go) pause and resume the ETW collector/cert-checker
+	// without touching the window, tray, or process itself, unlike Quit.
+	mon *monitorController
 }
 
-func NewApp(st *store.Store) *App {
-	return &App{st: st}
+func NewApp(st *store.Store, dataDir string) *App {
+	return &App{st: st, dataDir: dataDir}
 }
 
 // startup is Wails' OnStartup hook target; ctx becomes usable for
@@ -46,6 +65,35 @@ func (a *App) Context() (context.Context, bool) {
 	a.ctxMu.RLock()
 	defer a.ctxMu.RUnlock()
 	return a.ctx, a.ctx != nil
+}
+
+// SetQuitFunc records the shutdown sequence Quit should invoke. Called
+// exactly once, synchronously, from main() right after NewApp — before the
+// tray goroutine is spawned or wails.Run (and therefore any JS-reachable
+// call to Quit) starts, so no synchronization is needed around the field
+// itself: the write happens-before every possible read.
+func (a *App) SetQuitFunc(fn func()) {
+	a.quitFn = fn
+}
+
+// Quit stops monitoring and exits the whole process — the dashboard's
+// "Quit Monitoring" button in the settings modal, doing exactly what the
+// tray icon's "quit" menu item does (they share the same closure; see
+// main()'s doQuit). The frontend is expected to confirm with the user
+// first: unlike closing the window (which just hides it, per
+// HideWindowOnClose), this really does end monitoring.
+func (a *App) Quit() {
+	if a.quitFn != nil {
+		a.quitFn()
+	}
+}
+
+// SetMonitor records the monitorController Stop/StartMonitoring should
+// drive. Called exactly once, synchronously, from main() — same
+// happens-before reasoning as SetQuitFunc above, so no synchronization is
+// needed around the field itself.
+func (a *App) SetMonitor(m *monitorController) {
+	a.mon = m
 }
 
 // Snapshot is the initial-load payload the dashboard fetches once on

@@ -42,3 +42,16 @@ func uninstallAutostart() error {
 	}
 	return nil
 }
+
+// autostartEnabled reports whether the scheduled task is currently
+// registered, by asking Task Scheduler directly rather than tracking our
+// own state — that way it's always correct even if the task was
+// registered/removed by an older build's CLI flags, or edited by hand.
+// schtasks /Query exits non-zero (and writes an error to stderr, discarded
+// here) when the task doesn't exist; that exit status alone is all this
+// needs; parsing its human-readable output would be far more fragile.
+func autostartEnabled() bool {
+	cmd := exec.Command("schtasks.exe", "/Query", "/TN", taskName)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return cmd.Run() == nil
+}

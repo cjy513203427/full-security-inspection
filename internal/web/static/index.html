@@ -5,6 +5,21 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>NetWatch CookieGuard</title>
 <link rel="stylesheet" href="/style.css">
+<script>
+// Applies a saved theme choice before the page paints, so there's no
+// flash of the wrong theme while app.js (loaded at the end of body) is
+// still parsing. Mirrors the persistence key/values app.js's own theme
+// code uses (see its "settings panel" section) — kept in sync manually
+// since this one has to run standalone, this early.
+(() => {
+  try {
+    const saved = localStorage.getItem('netwatch_theme');
+    if (saved === 'light' || saved === 'dark') {
+      document.documentElement.setAttribute('data-theme', saved);
+    }
+  } catch {}
+})();
+</script>
 </head>
 <body>
 <svg class="icon-sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
@@ -26,19 +41,96 @@
   <symbol id="icon-check" viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></symbol>
   <symbol id="icon-help-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 2-3 4"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
   <symbol id="icon-shield-alert" viewBox="0 0 24 24"><path d="M12 2 3 6v6c0 5 3.8 9.3 9 10 5.2-.7 9-5 9-10V6z"/><line x1="12" y1="8" x2="12" y2="13"/><line x1="12" y1="16.5" x2="12.01" y2="16.5"/></symbol>
+  <symbol id="icon-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2.5"/><line x1="19" y1="12" x2="21.5" y2="12"/><line x1="16.95" y1="16.95" x2="18.72" y2="18.72"/><line x1="12" y1="19" x2="12" y2="21.5"/><line x1="7.05" y1="16.95" x2="5.28" y2="18.72"/><line x1="5" y1="12" x2="2.5" y2="12"/><line x1="7.05" y1="7.05" x2="5.28" y2="5.28"/><line x1="12" y1="5" x2="12" y2="2.5"/><line x1="16.95" y1="7.05" x2="18.72" y2="5.28"/></symbol>
+  <symbol id="icon-x" viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></symbol>
 </svg>
 <header class="app-header">
   <h1><svg class="icon icon-lg"><use href="#icon-shield"/></svg> NetWatch CookieGuard</h1>
   <span class="subtitle" data-i18n="header.subtitle">本机进程级网络 / 敏感文件监控</span>
   <div class="spacer"></div>
   <span class="status-pill"><span class="conn-dot" id="connDot"></span><span id="connLabel">连接中…</span></span>
-  <select class="select-input" id="langSelect" data-i18n-title="lang.switch_title" title="切换界面语言">
-    <option value="zh">中文</option>
-    <option value="en">English</option>
-    <option value="de">Deutsch</option>
-  </select>
   <button class="btn" id="pauseBtn" data-i18n-title="btn.pause_title" title="暂停后新事件仍会记录,只是不刷新界面"><svg class="icon"><use href="#icon-pause"/></svg> <span data-i18n="btn.pause">暂停刷新</span></button>
 </header>
+
+<button class="fab-settings" id="settingsBtn" data-i18n-title="settings.title" title="设置" aria-haspopup="dialog">
+  <svg class="icon"><use href="#icon-settings"/></svg>
+</button>
+
+<div class="modal-overlay" id="settingsOverlay">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+    <div class="modal-header">
+      <h2 id="settingsTitle" data-i18n="settings.title">设置</h2>
+      <button class="icon-btn" id="settingsClose" data-i18n-title="settings.close" title="关闭">
+        <svg class="icon"><use href="#icon-x"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="settings-row">
+        <label for="langSelect" data-i18n="settings.language">语言</label>
+        <select class="select-input" id="langSelect">
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+          <option value="de">Deutsch</option>
+        </select>
+      </div>
+      <div class="settings-row">
+        <label for="themeSelect" data-i18n="settings.theme">外观</label>
+        <select class="select-input" id="themeSelect">
+          <option value="system" data-i18n="theme.system">跟随系统</option>
+          <option value="light" data-i18n="theme.light">浅色</option>
+          <option value="dark" data-i18n="theme.dark">深色</option>
+        </select>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-block">
+        <div class="settings-row">
+          <label data-i18n="settings.monitoring">监控状态</label>
+          <button class="btn" id="monitorToggleBtn">停止监控</button>
+        </div>
+        <div class="settings-hint" id="monitorStatusHint">正在监控中。</div>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-row">
+        <label for="autostartToggle" data-i18n="settings.autostart">开机自启动</label>
+        <input type="checkbox" id="autostartToggle">
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-block">
+        <div class="settings-row">
+          <label data-i18n="settings.log_dir">日志目录</label>
+          <button class="btn" id="openDataDirBtn">
+            <svg class="icon"><use href="#icon-folder"/></svg> <span data-i18n="settings.open_dir_btn">打开</span>
+          </button>
+        </div>
+        <div class="settings-path" id="dataDirPath"></div>
+      </div>
+
+      <div class="settings-block">
+        <div class="settings-row">
+          <label data-i18n="settings.clean_logs">清理日志</label>
+          <button class="btn" id="cleanLogsBtn" data-i18n="settings.clean_logs_btn">清理</button>
+        </div>
+        <div class="settings-hint" id="cleanLogsResult"></div>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-block">
+        <div class="settings-row">
+          <label data-i18n="settings.quit">退出程序</label>
+          <button class="btn btn-danger" id="quitBtn" data-i18n="settings.quit_btn">退出程序</button>
+        </div>
+        <div class="settings-hint" data-i18n="settings.quit_hint">这会关闭整个程序,包括系统托盘图标。如果只是想暂停采集,用上面的「停止监控」即可,不用退出程序。</div>
+      </div>
+    </div>
+  </div>
+</div>
 <main>
   <section class="stat-row">
     <div class="stat-tile critical">

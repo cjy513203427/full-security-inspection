@@ -584,6 +584,183 @@
     if (!state.paused) renderAll();
   });
 
+  // ---------- settings (bottom-left gear FAB -> modal dialog) ----------
+
+  const settingsBtn = document.getElementById('settingsBtn');
+  const settingsOverlay = document.getElementById('settingsOverlay');
+  const settingsClose = document.getElementById('settingsClose');
+
+  function openSettings() {
+    settingsOverlay.classList.add('open');
+  }
+  function closeSettings() {
+    settingsOverlay.classList.remove('open');
+  }
+  settingsBtn.addEventListener('click', openSettings);
+  settingsClose.addEventListener('click', closeSettings);
+  // Clicking the dimmed backdrop closes it; clicking inside the modal card
+  // itself must not (that's every settings-row select/label in there) — the
+  // check is just "did the click land on the overlay element itself, not
+  // something inside it", since .modal is the overlay's only child covering
+  // part of it.
+  settingsOverlay.addEventListener('click', (ev) => {
+    if (ev.target === settingsOverlay) closeSettings();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && settingsOverlay.classList.contains('open')) closeSettings();
+  });
+
+  // ---------- theme (light / dark / system) ----------
+  //
+  // "system" is the implicit default: no data-theme attribute at all, so
+  // style.css's prefers-color-scheme media query alone decides. "light"/
+  // "dark" set data-theme explicitly, which style.css's
+  // :root[data-theme="..."] rules (and the :not([data-theme="light"]) guard
+  // on the dark media query) give priority over the OS preference. See
+  // index.html's inline head script for the no-flash-on-load counterpart
+  // to this — it has to duplicate the localStorage key/values here since it
+  // runs standalone, before this file loads.
+  const THEME_STORAGE_KEY = 'netwatch_theme';
+
+  function applyTheme(theme) {
+    if (theme === 'light' || theme === 'dark') {
+      document.documentElement.setAttribute('data-theme', theme);
+    } else {
+      theme = 'system';
+      document.documentElement.removeAttribute('data-theme');
+    }
+    document.getElementById('themeSelect').value = theme;
+  }
+
+  document.getElementById('themeSelect').addEventListener('change', (ev) => {
+    const theme = ev.target.value;
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+    applyTheme(theme);
+  });
+
+  applyTheme(localStorage.getItem(THEME_STORAGE_KEY) || 'system');
+
+  // ---------- settings: autostart / log directory / clean logs ----------
+  //
+  // Unlike language/theme, these three have no client-side fallback at
+  // all — they only mean anything via the Go backend (Task Scheduler,
+  // this instance's actual data directory) — so each one's initial state
+  // is fetched from window.go.main.App once at startup rather than having
+  // a meaningful default to render before that resolves.
+
+  async function initAutostartToggle() {
+    const box = document.getElementById('autostartToggle');
+    try {
+      box.checked = await window.go.main.App.GetAutostartEnabled();
+    } catch (e) {
+      console.error('GetAutostartEnabled failed', e);
+    }
+  }
+
+  document.getElementById('autostartToggle').addEventListener('change', async (ev) => {
+    const box = ev.target;
+    const wanted = box.checked;
+    box.disabled = true;
+    try {
+      box.checked = await window.go.main.App.SetAutostart(wanted);
+    } catch (e) {
+      box.checked = !wanted; // the call rejected outright: revert the optimistic UI flip
+      alert(i18n.t('settings.autostart_failed', String(e)));
+    } finally {
+      box.disabled = false;
+    }
+  });
+
+  async function initDataDirDisplay() {
+    try {
+      document.getElementById('dataDirPath').textContent = await window.go.main.App.GetDataDir();
+    } catch (e) {
+      console.error('GetDataDir failed', e);
+    }
+  }
+
+  document.getElementById('openDataDirBtn').addEventListener('click', () => {
+    window.go.main.App.OpenDataDir().catch((e) => console.error('OpenDataDir failed', e));
+  });
+
+  document.getElementById('cleanLogsBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('cleanLogsBtn');
+    const resultEl = document.getElementById('cleanLogsResult');
+    btn.disabled = true;
+    resultEl.textContent = '';
+    try {
+      // CleanLogs never rejects (see its Go doc comment: a partial clean —
+      // some files freed, some still in use because monitoring is running
+      // — is an expected outcome to display, not a failed call), so this
+      // branch only fires on a genuine IPC-level failure.
+      const res = await window.go.main.App.CleanLogs();
+      const mb = (res.freedBytes / (1024 * 1024)).toFixed(1);
+      let msg = i18n.t('settings.clean_logs_done', mb);
+      if (res.error) msg += ' ' + i18n.t('settings.clean_logs_partial');
+      resultEl.textContent = msg;
+    } catch (e) {
+      resultEl.textContent = i18n.t('settings.clean_logs_failed', String(e));
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Quitting is the one action in this modal that isn't reversible from
+  // the dashboard — it stops monitoring and exits the whole background
+  // process, not just this window (unlike the [X] title-bar close, which
+  // HideWindowOnClose just hides). A plain window.confirm() is enough of
+  // a speed bump for that; no need for a custom dialog to ask one yes/no
+  // question.
+  document.getElementById('quitBtn').addEventListener('click', () => {
+    if (confirm(i18n.t('settings.quit_confirm'))) {
+      window.go.main.App.Quit();
+    }
+  });
+
+  // ---------- monitoring status (stop / start, without exiting) ----------
+  //
+  // Distinct from Quit above: this pauses/resumes the ETW collector and
+  // cert-check prober only — the window, tray, and process all stay up.
+  // Its button/hint text depends on runtime state, not just language, so
+  // (like connLabel/pauseBtn) it's redrawn directly by JS rather than
+  // through translatePage()'s static data-i18n attributes; applyLanguage
+  // (below) re-calls updateMonitorUI with the last-known state so a
+  // language switch while this text is showing doesn't leave it stale.
+  let monitoringRunning = true; // matches the backend's state at a fresh launch
+
+  function updateMonitorUI(running) {
+    monitoringRunning = running;
+    document.getElementById('monitorToggleBtn').textContent =
+      running ? i18n.t('settings.stop_monitoring') : i18n.t('settings.start_monitoring');
+    document.getElementById('monitorStatusHint').textContent =
+      running ? i18n.t('settings.monitoring_running') : i18n.t('settings.monitoring_stopped');
+  }
+
+  async function refreshMonitorStatus() {
+    try {
+      updateMonitorUI(await window.go.main.App.GetMonitoring());
+    } catch (e) {
+      console.error('GetMonitoring failed', e);
+    }
+  }
+
+  document.getElementById('monitorToggleBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('monitorToggleBtn');
+    btn.disabled = true;
+    try {
+      if (monitoringRunning) {
+        await window.go.main.App.StopMonitoring();
+      } else {
+        await window.go.main.App.StartMonitoring();
+      }
+    } catch (e) {
+      alert(i18n.t('settings.monitoring_toggle_failed', String(e)));
+    } finally {
+      btn.disabled = false;
+      refreshMonitorStatus();
+    }
+  });
+
   // ---------- language switching ----------
   //
   // The dashboard's own DOM chrome (this file + i18n.js) translates itself
@@ -607,6 +784,7 @@
     // whatever state they're currently in (see each function's own note).
     setConn(isConnected);
     updatePauseBtn();
+    updateMonitorUI(monitoringRunning);
     renderAll();
   }
 
@@ -643,4 +821,7 @@
 
   connect();
   initLanguage().finally(loadSnapshot);
+  initAutostartToggle();
+  initDataDirDisplay();
+  refreshMonitorStatus();
 })();

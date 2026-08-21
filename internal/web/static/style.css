@@ -26,8 +26,18 @@
   --success-text: #006300;
 }
 
+/* Three theme states, per the settings panel's "外观/Theme" select:
+   - "system" (default, no data-theme attribute set): follows the OS via
+     prefers-color-scheme below.
+   - "light": forces the :root defaults above even if the OS prefers dark —
+     the :not([data-theme="light"]) guard on the media query is what makes
+     that override actually take effect instead of losing to it.
+   - "dark": forces dark below even if the OS prefers light, via the
+     explicit [data-theme="dark"] block (identical values to the media
+     query — kept in sync manually since one is condition-gated and the
+     other is attribute-gated, see the "app.js theme" comment below). */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --surface-1: #1a1a19;
     --plane: #0d0d0d;
@@ -49,6 +59,29 @@
 
     --success-text: #0ca30c;
   }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --plane: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --border-strong: rgba(255, 255, 255, 0.18);
+
+  --series-blue: #3987e5;
+  --series-red: #e66767;
+
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-serious: #ec835a;
+  --status-critical: #d03b3b;
+
+  --success-text: #0ca30c;
 }
 
 * { box-sizing: border-box; }
@@ -150,6 +183,157 @@ a { color: var(--series-blue); }
 }
 .btn:hover { border-color: var(--series-blue); }
 .btn:active { transform: translateY(1px); }
+
+/* The one genuinely destructive action reachable from the settings modal
+   (ends monitoring and exits the whole process, not just this window) —
+   colored to read as "this one's different" next to the plain .btn actions
+   around it (Open/Clean), not merely another neutral option. */
+.btn-danger {
+  border-color: color-mix(in srgb, var(--status-critical) 45%, var(--border-strong));
+  color: var(--status-critical);
+}
+.btn-danger:hover {
+  border-color: var(--status-critical);
+  background: color-mix(in srgb, var(--status-critical) 10%, var(--surface-1));
+}
+
+/* A plain, borderless icon-only button — the modal's close (x), as opposed
+   to .btn's bordered/filled look used for actions like pause/resume. */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.icon-btn:hover { background: var(--plane); color: var(--text-primary); }
+.icon-btn:active { transform: translateY(1px); }
+.icon-btn .icon { width: 15px; height: 15px; }
+
+/* ---------------- settings (bottom-left FAB + modal) ---------------- */
+
+.fab-settings {
+  position: fixed;
+  left: 20px;
+  bottom: 20px;
+  z-index: 25;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-secondary);
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18);
+}
+.fab-settings:hover { color: var(--series-blue); border-color: var(--series-blue); }
+.fab-settings:active { transform: translateY(1px); }
+.fab-settings .icon { width: 18px; height: 18px; }
+
+/* display:none/.open is a plain class toggle (app.js) rather than the
+   [hidden] attribute — an earlier version used [hidden] and this file's own
+   higher-specificity display:flex on the same element silently won the
+   cascade over the UA stylesheet's [hidden] { display:none }, so the panel
+   never actually closed. A class the author stylesheet itself defines both
+   states for doesn't have that trap. */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(0, 0, 0, 0.45);
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+
+.modal {
+  width: 320px;
+  max-width: calc(100vw - 40px);
+  background: var(--surface-1);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  padding: 16px;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.modal-header h2 {
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-row label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.settings-row .select-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-row input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--series-blue);
+  cursor: pointer;
+}
+
+.settings-divider {
+  height: 1px;
+  background: var(--gridline);
+  margin: 2px 0;
+}
+
+.settings-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-path {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+  user-select: text;
+}
+
+.settings-hint {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  min-height: 1.4em; /* reserves its own line so the button below/above it doesn't jump when a result appears */
+}
 
 main {
   max-width: 1320px;

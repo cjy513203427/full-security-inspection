@@ -194,11 +194,38 @@ internal/certcheck (periodic active TLS probes) ──────────�
 - **`cmd/netwatch`**: `main.go` wires the whole pipeline and owns the Wails `options.App` config;
   `app.go` is the Wails-bound object (`App.GetSnapshot`, `App.AckAlert`, `App.GetLanguage`,
   `App.SetLanguage` — exported methods become `window.go.main.App.<Method>()` promises on the JS
-  side); `elevate_windows.go` /
+  side); `app_settings.go` adds the dashboard's settings-modal methods
+  (`App.GetDataDir`/`OpenDataDir`, `App.CleanLogs`, `App.GetAutostartEnabled`/`SetAutostart`,
+  `App.GetMonitoring`/`StopMonitoring`/`StartMonitoring`) — kept in their own file since `app.go`
+  is the core snapshot/alert/language surface and this is a distinct, later-added concern;
+  `elevate_windows.go` /
   `privilege_windows.go` handle UAC self-relaunch and enabling `SeDebugPrivilege` (needed to open
   handles to browser sandboxed subprocesses — without it they show up as unidentifiable processes
   touching the browser's own cookie file, a false positive this fixes at the source);
-  `autostart_windows.go` manages the scheduled-task-based autostart.
+  `autostart_windows.go` manages the scheduled-task-based autostart, including `autostartEnabled()`
+  (queries Task Scheduler directly via `schtasks /Query` rather than tracking state of our own, so
+  it's correct even if the task was touched outside the dashboard).
+
+  There are two distinct, deliberately non-overlapping "stop" actions, both reachable from the
+  dashboard's Settings modal (previously only the tray's right-click menu could stop anything at
+  all, which is why both buttons exist now):
+  - **Stop Monitoring** (`App.StopMonitoring`/`StartMonitoring`) pauses/resumes only the ETW
+    collector and cert-check prober, via [monitor.go](cmd/netwatch/monitor.go)'s
+    `monitorController` — the window, tray, store, and process all stay up, so e.g. Clean Logs
+    stays reachable. `Start` always *rebuilds* a fresh `etwmon.Collector`/`certcheck.Checker`
+    rather than reusing the stopped ones — `certcheck.Checker.Stop` closes its own `stopCh`
+    exactly once, so calling `Start` again on that same instance would find it already
+    permanently closed and exit its loop immediately, silently monitoring nothing.
+  - **Exit Program** (`App.Quit`) actually ends the process. `main()` builds this shutdown
+    sequence once, as a `doQuit` closure, and both the tray's "Exit Program" menu item and the
+    dashboard's button call the exact same one (`App.SetQuitFunc(doQuit)`) — sharing it rather
+    than giving the dashboard its own copy means there's exactly one place the shutdown order can
+    be defined, not two that can drift apart. `doQuit` deliberately calls
+    `wailsRuntime.WindowHide`/`tray.Quit()` *before* the slower `mon.Stop()`/`st.Close()` cleanup,
+    not after — a real-time ETW session's `ProcessTrace` only returns on its own buffer-flush
+    cadence (can be a second or more, an OS characteristic, not something fixable in `etwmon`),
+    and without this reordering the window stuck around looking hung for that whole window
+    instead of disappearing the instant "quit" was clicked.
 - **`internal/i18n`** ([i18n.go](internal/i18n/i18n.go), [catalog.go](internal/i18n/catalog.go)) is
   the backend's translation layer — Chinese/English/German (`ZH`/`EN`/`DE`), one active `Lang` for
   the whole process, read by every `T(key, args...)` call. Covers everything the Go side produces

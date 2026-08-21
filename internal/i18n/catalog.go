@@ -166,6 +166,16 @@ var catalog = map[string]map[Lang]string{
 		EN: "Stopping monitoring…",
 		DE: "Überwachung wird gestoppt…",
 	},
+	"log.monitoring_stopped_by_user": {
+		ZH: "已通过控制面板停止监控(程序仍在运行)",
+		EN: "Monitoring stopped from the dashboard (the program is still running)",
+		DE: "Überwachung über das Dashboard gestoppt (das Programm läuft weiter)",
+	},
+	"log.monitoring_started_by_user": {
+		ZH: "已通过控制面板重新开始监控",
+		EN: "Monitoring restarted from the dashboard",
+		DE: "Überwachung über das Dashboard neu gestartet",
+	},
 	"log.window_start_failed": {
 		ZH: "启动窗口失败: %v\n(WebView2 运行时可能缺失,下载: https://developer.microsoft.com/microsoft-edge/webview2/)",
 		EN: "Failed to start the window: %v\n(the WebView2 runtime may be missing — download: https://developer.microsoft.com/microsoft-edge/webview2/)",
@@ -220,14 +230,14 @@ var catalog = map[string]map[Lang]string{
 		DE: "Status: Normale Überwachung",
 	},
 	"tray.quit": {
-		ZH: "退出监控",
-		EN: "Quit Monitoring",
-		DE: "Überwachung beenden",
+		ZH: "退出程序",
+		EN: "Exit Program",
+		DE: "Programm beenden",
 	},
 	"tray.quit_desc": {
-		ZH: "停止监控并退出",
-		EN: "Stop monitoring and exit",
-		DE: "Überwachung stoppen und beenden",
+		ZH: "停止监控并退出整个程序",
+		EN: "Stop monitoring and exit the whole program",
+		DE: "Überwachung stoppen und das gesamte Programm beenden",
 	},
 
 	// ---------- alert titles/details (internal/correlate) ----------

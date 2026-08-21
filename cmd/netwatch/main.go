@@ -182,22 +182,56 @@ func main() {
 		},
 	})
 
-	collector, err := etwmon.New(etwmon.Handlers{
-		OnProcessStart: func(p model.ProcessInfo) {
-			procs.Observe(p)
-			st.UpdateProc(p)
-		},
-		OnProcessStop: func(pid uint32, t time.Time) {
-			procs.MarkExited(pid, t)
-		},
-		OnFile: engine.HandleFile,
-		OnNet:  engine.HandleNet,
-		OnDNS:  engine.HandleDNS,
-	}, selfPID, *debugETW)
+	// buildCollector/buildChecker capture everything needed to construct a
+	// fresh ETW collector / cert-checker — used for the very first start
+	// right below, and again by monitorController.Start on every
+	// subsequent restart the dashboard's "Start Monitoring" button
+	// triggers (see monitor.go's doc comment for why *fresh* instances
+	// rather than reusing stopped ones).
+	buildCollector := func() (*etwmon.Collector, error) {
+		return etwmon.New(etwmon.Handlers{
+			OnProcessStart: func(p model.ProcessInfo) {
+				procs.Observe(p)
+				st.UpdateProc(p)
+			},
+			OnProcessStop: func(pid uint32, t time.Time) {
+				procs.MarkExited(pid, t)
+			},
+			OnFile: engine.HandleFile,
+			OnNet:  engine.HandleNet,
+			OnDNS:  engine.HandleDNS,
+		}, selfPID, *debugETW)
+	}
+	// certChecker is the one thing in this tool that initiates its own
+	// outbound connections (a handful of HTTPS probes every few minutes)
+	// rather than only passively observing everyone else's via ETW — see
+	// internal/certcheck's package doc for why. selfPID exclusion in
+	// etwmon.New above already keeps this process's own traffic out of the
+	// normal file/net event stream, so these probes never show up
+	// mislabeled as "a process phoning home".
+	buildChecker := func() *certcheck.Checker {
+		if *disableCertCheck {
+			return nil
+		}
+		return certcheck.New(certcheck.Handlers{
+			OnCheck: st.AddCertCheck,
+			OnAlert: func(a model.Alert) {
+				st.AddAlert(a)
+				log.Printf("[ALERT %s] %s — %s", a.Severity, a.Title, a.Detail)
+			},
+		}, filepath.Join(*dataDir, "certcheck_baseline.json"))
+	}
+
+	// The very first start keeps its own fatal-on-failure handling here
+	// rather than going through monitorController.Start: a failure at boot
+	// means this whole app can't do its one job and should say so loudly;
+	// a failure restarting later from the dashboard (mon.Start, via
+	// App.StartMonitoring) should just report an error back to the
+	// dashboard instead of taking the whole process down with it.
+	collector, err := buildCollector()
 	if err != nil {
 		fatalWithBox(i18n.T("log.init_etw_failed"), err)
 	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	if err := collector.Start(ctx); err != nil {
 		if *skipElevate {
@@ -209,32 +243,55 @@ func main() {
 			fatalWithBox(i18n.T("log.etw_start_failed"), err)
 		}
 	}
-
-	// certChecker is the one thing in this tool that initiates its own
-	// outbound connections (a handful of HTTPS probes every few minutes)
-	// rather than only passively observing everyone else's via ETW — see
-	// internal/certcheck's package doc for why. selfPID exclusion in
-	// etwmon.New above already keeps this process's own traffic out of the
-	// normal file/net event stream, so these probes never show up
-	// mislabeled as "a process phoning home".
-	var certChecker *certcheck.Checker
-	if !*disableCertCheck {
-		certChecker = certcheck.New(certcheck.Handlers{
-			OnCheck: st.AddCertCheck,
-			OnAlert: func(a model.Alert) {
-				st.AddAlert(a)
-				log.Printf("[ALERT %s] %s — %s", a.Severity, a.Title, a.Detail)
-			},
-		}, filepath.Join(*dataDir, "certcheck_baseline.json"))
+	certChecker := buildChecker()
+	if certChecker != nil {
 		_ = certChecker.Start(ctx) // always succeeds — see Start's doc comment
 	}
+
+	mon := newMonitorController(buildCollector, buildChecker)
+	mon.adopt(collector, certChecker, cancel)
 
 	assets, err := web.Assets()
 	if err != nil {
 		fatalWithBox(i18n.T("log.load_assets_failed"), err)
 	}
 
-	app := NewApp(st)
+	app := NewApp(st, *dataDir)
+	app.SetMonitor(mon)
+
+	// doQuit is the one shutdown path for the whole *process* — reached
+	// from the tray's "Exit Program" menu item, or the dashboard's own
+	// Settings-modal "Exit Program" button (App.Quit, in app_settings.go,
+	// just calls whatever was handed to app.SetQuitFunc below). Contrast
+	// with the dashboard's separate "Stop Monitoring" (App.StopMonitoring
+	// -> mon.Stop()), which pauses collection without touching any of
+	// this — doQuit is for when the user wants the app itself gone, not
+	// just paused. Keeping this as a single named closure rather than
+	// duplicating the sequence in both call sites means there's exactly
+	// one place that can drift out of correct shutdown order.
+	doQuit := func() {
+		log.Println(i18n.T("log.stopping_monitor"))
+		// Make the window/tray disappear immediately, before the slower
+		// cleanup below — mon.Stop() (specifically the ETW collector
+		// teardown inside it) can take a second or more: Windows only
+		// signals a real-time ETW session's ProcessTrace call to actually
+		// return on its own buffer-flush cadence, which is an OS-level
+		// characteristic nothing in this codebase controls, not a bug to
+		// fix in the collector itself. Without this reordering, quitting
+		// looked hung for a couple of seconds even though it wasn't — the
+		// process was already on its way out, just not visibly.
+		if ctx, ok := app.Context(); ok {
+			wailsRuntime.WindowHide(ctx)
+		}
+		tray.Quit()
+		mon.Stop()
+		st.Close()
+		if ctx, ok := app.Context(); ok {
+			wailsRuntime.Quit(ctx)
+		}
+		os.Exit(0)
+	}
+	app.SetQuitFunc(doQuit)
 
 	log.Print(i18n.T("log.starting_window"))
 	log.Printf(i18n.T("log.data_dir"), *dataDir)
@@ -250,20 +307,7 @@ func main() {
 					wailsRuntime.WindowUnminimise(ctx)
 				}
 			},
-			func() {
-				log.Println(i18n.T("log.stopping_monitor"))
-				cancel()
-				collector.Stop()
-				if certChecker != nil {
-					certChecker.Stop()
-				}
-				st.Close()
-				if ctx, ok := app.Context(); ok {
-					wailsRuntime.Quit(ctx)
-				}
-				tray.Quit()
-				os.Exit(0)
-			},
+			doQuit,
 		)
 	}()
 
